@@ -204,18 +204,46 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   void _showUpdateDialog(BuildContext context, String newVersion) {
-    showDialog(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text("🚀 发现新版本！"),
-        content: Text("检测到新版本 $newVersion，建议立即更新。"),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(c), child: const Text("取消")),
-          ElevatedButton(onPressed: () async => await launchUrl(Uri.parse('https://你的官网')), child: const Text("更新")),
-        ],
-      ),
-    );
-  }
+  showDialog(
+    context: context,
+    builder: (c) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+      title: const Text("🚀 发现新版本！"),
+      content: Text("检测到新版本 $newVersion，建议立即更新以获得更好的体验。"),
+      actions: [
+        // 取消按钮
+        TextButton(
+          onPressed: () => Navigator.pop(c), 
+          child: const Text("稍后再说", style: TextStyle(color: Colors.grey))
+        ),
+        // 更新按钮
+        ElevatedButton(
+          onPressed: () async {
+            // 💡 这里的 URL 指向你仓库的最新 Release 页面
+            final Uri url = Uri.parse('https://github.com/TirFire/grain_buds/releases/latest');
+            
+            if (await canLaunchUrl(url)) {
+              // 使用外部浏览器打开，这样用户下载 .exe 更方便
+              await launchUrl(url, mode: LaunchMode.externalApplication);
+              if (context.mounted) Navigator.pop(c); // 点击后自动关闭弹窗
+            } else {
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("无法打开浏览器，请手动前往 GitHub 检查更新"))
+                );
+              }
+            }
+          },
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.teal, // 使用你项目的主色调
+            foregroundColor: Colors.white,
+          ),
+          child: const Text("立即前往下载"),
+        ),
+      ],
+    ),
+  );
+}
 
   void _showAboutDetail(BuildContext context) {
     showDialog(
