@@ -1,19 +1,24 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:sqflite/sqflite.dart'; // 💡 补全了核心数据库引用
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:media_kit/media_kit.dart'; // 💡 引入媒体引擎
 
 import 'pages/home_page.dart';
 
-// 💡 阶段 B 核心：全局状态管理器
 final GlobalKey<NavigatorState> globalNavigatorKey = GlobalKey<NavigatorState>();
 final ValueNotifier<ThemeMode> globalThemeMode = ValueNotifier(ThemeMode.light);
 final ValueNotifier<bool> globalEyeCareMode = ValueNotifier(false);
-bool globalEnableTypingSound = false; // 供编辑器直接读取
+bool globalEnableTypingSound = false; 
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // 💡 初始化全能视频播放器底层引擎
+  MediaKit.ensureInitialized();
+
   if (Platform.isWindows || Platform.isLinux) {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
@@ -22,7 +27,6 @@ void main() async {
   final prefs = await SharedPreferences.getInstance();
   final bool useLock = prefs.getBool('use_lock') ?? false;
   final String lockPwd = prefs.getString('lock_pwd') ?? '';
-  // 💡 读取密保数据传给锁屏
   final String lockQuestion = prefs.getString('lock_question') ?? '';
   final String lockAnswer = prefs.getString('lock_answer') ?? '';
   
@@ -36,8 +40,8 @@ void main() async {
 class MyDiaryApp extends StatefulWidget {
   final bool useLock;
   final String lockPwd;
-  final String lockQuestion; // 💡 新增
-  final String lockAnswer;   // 💡 新增
+  final String lockQuestion; 
+  final String lockAnswer;   
 
   const MyDiaryApp({super.key, required this.useLock, required this.lockPwd, required this.lockQuestion, required this.lockAnswer});
 
@@ -60,7 +64,6 @@ class _MyDiaryAppState extends State<MyDiaryApp> {
       _idleTimer = Timer(const Duration(minutes: 1), () {
         if (globalNavigatorKey.currentState != null) {
           globalNavigatorKey.currentState!.pushAndRemoveUntil(
-            // 💡 传参给 LockScreen
             MaterialPageRoute(builder: (context) => LockScreen(correctPwd: widget.lockPwd, question: widget.lockQuestion, answer: widget.lockAnswer)),
             (route) => false,
           );
@@ -75,20 +78,17 @@ class _MyDiaryAppState extends State<MyDiaryApp> {
       onPointerDown: _resetIdleTimer,
       onPointerMove: _resetIdleTimer,
       behavior: HitTestBehavior.translucent,
-      // 💡 监听主题变化，实时刷新
       child: ValueListenableBuilder<ThemeMode>(
         valueListenable: globalThemeMode,
         builder: (context, themeMode, _) {
           return ValueListenableBuilder<bool>(
             valueListenable: globalEyeCareMode,
             builder: (context, isEyeCare, _) {
-              
-              // 💡 动态生成主题配色
               final lightTheme = isEyeCare 
                 ? ThemeData(
                     fontFamily: 'Microsoft YaHei',
                     colorScheme: ColorScheme.fromSeed(seedColor: Colors.brown),
-                    scaffoldBackgroundColor: const Color(0xFFFAF3E0), // 暖色护眼纸张底色
+                    scaffoldBackgroundColor: const Color(0xFFFAF3E0), 
                     appBarTheme: const AppBarTheme(backgroundColor: Color(0xFFD7CCC8), foregroundColor: Colors.black87),
                     cardColor: const Color(0xFFFFFDF8),
                     useMaterial3: true,
@@ -121,12 +121,10 @@ class _MyDiaryAppState extends State<MyDiaryApp> {
   }
 }
 
-// ================= 锁屏页面 =================
-// ================= 锁屏页面 =================
 class LockScreen extends StatefulWidget {
   final String correctPwd;
-  final String question; // 💡 密保问题
-  final String answer;   // 💡 密保答案
+  final String question; 
+  final String answer;   
 
   const LockScreen({super.key, required this.correctPwd, required this.question, required this.answer});
   @override
@@ -145,7 +143,6 @@ class _LockScreenState extends State<LockScreen> {
     }
   }
 
-  // 💡 核心找回逻辑：弹出验证密保的弹窗
   void _showRecoveryDialog() {
     if (widget.question.isEmpty || widget.answer.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('您之前未设置密保问题，无法找回密码')));
@@ -175,13 +172,12 @@ class _LockScreenState extends State<LockScreen> {
           ElevatedButton(
             onPressed: () async {
               if (answerCtrl.text.trim() == widget.answer) {
-                // 💡 验证成功！清除密码锁，并进入主页
                 final prefs = await SharedPreferences.getInstance();
                 await prefs.setBool('use_lock', false);
                 await prefs.setString('lock_pwd', '');
                 
                 if (mounted) {
-                  Navigator.pop(c); // 关掉弹窗
+                  Navigator.pop(c); 
                   Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const HomePage()));
                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('🔓 密码已被强制清除，请前往设置重新绑定！'), backgroundColor: Colors.teal));
                 }
@@ -227,7 +223,6 @@ class _LockScreenState extends State<LockScreen> {
                 child: const Text('解 锁'),
               ),
               const SizedBox(height: 10),
-              // 💡 忘记密码的入口
               TextButton(
                 onPressed: _showRecoveryDialog,
                 child: const Text('忘记密码？', style: TextStyle(color: Colors.grey)),

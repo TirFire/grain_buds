@@ -14,6 +14,7 @@ import '../core/encryption_service.dart';
 import 'full_screen_gallery.dart';
 import '../pages/diary_share_page.dart'; 
 import 'package:markdown/markdown.dart' as md; 
+import 'package:url_launcher/url_launcher.dart'; // 💡 新增：用于调用系统浏览器打开网页链接
 
 class DiaryCard extends StatelessWidget {
   final Map<String, dynamic> diary;
@@ -152,9 +153,11 @@ class DiaryCard extends StatelessWidget {
 
   void _showDetail(BuildContext context, String? decryptedContent, {String? pwdKey}) {
     final images = _parseList(diary['imagePath'] as String?);
+    // 安全获取视频路径，防止拿到空字符串
+    final String? videoPath = (diary['videoPath'] != null && diary['videoPath'].toString().isNotEmpty) ? diary['videoPath'] : null;
+    
     final dateStr = diary['date'] as String? ?? DateTime.now().toString();
     final titleStr = diary['title'] as String? ?? '无标题';
-    
     final contentStr = decryptedContent ?? (diary['content'] as String? ?? '');
 
     showDialog(
@@ -170,14 +173,7 @@ class DiaryCard extends StatelessWidget {
                 children: [
                   const Icon(Icons.location_on, size: 14, color: Colors.teal),
                   const SizedBox(width: 4),
-                  Text(
-                    diary['location'], 
-                    style: const TextStyle(
-                      fontSize: 12, 
-                      color: Colors.teal, 
-                      fontWeight: FontWeight.normal
-                    ),
-                  ),
+                  Text(diary['location'], style: const TextStyle(fontSize: 12, color: Colors.teal, fontWeight: FontWeight.normal)),
                 ],
               ),
             ],
@@ -189,96 +185,87 @@ class DiaryCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min,
               children: [
+                // 💡 修复：赋予 Markdown 里的网址真正的“点击跳转”能力
                 MarkdownBody(
                   data: contentStr, 
-                  selectable: true,
-                  extensionSet: md.ExtensionSet.gitHubFlavored, 
+                  selectable: true, 
+                  extensionSet: md.ExtensionSet.gitHubFlavored,
+                  onTapLink: (text, href, title) async {
+                    if (href != null) {
+                      final Uri url = Uri.parse(href);
+                      if (await canLaunchUrl(url)) {
+                        // 调用 Windows 系统默认浏览器打开网页
+                        await launchUrl(url, mode: LaunchMode.externalApplication);
+                      }
+                    }
+                  },
                 ),
-                if (images.isNotEmpty)
+                
+                // 💡 核心修复：在详情浏览模式下显示图片和视频矩阵
+                if (images.isNotEmpty || videoPath != null)
                   Padding(
-                    padding: const EdgeInsets.only(top: 10),
+                    padding: const EdgeInsets.only(top: 15),
                     child: Wrap(
                       spacing: 8, runSpacing: 8,
-                      children: images.asMap().entries.map((entry) {
-                        final String path = entry.value;
-                        final bool isLive = path.toLowerCase().endsWith('.mp4') || path.toLowerCase().endsWith('.mov');
-                        
-                        // 💡 同样复用我们在编辑页写的魔法缩略图
-                        Widget thumbnail = isLive 
-                            ? LivePhotoThumbnail(videoPath: path, width: 80, height: 80)
-                            : Image.file(File(path), width: 80, height: 80, fit: BoxFit.cover);
+                      children: [
+                        // 1. 显示视频缩略图（带半透明播放图标）
+                        if (videoPath != null)
+                          GestureDetector(
+                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => FullScreenGallery(images: [videoPath], initialIndex: 0))),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  LivePhotoThumbnail(videoPath: videoPath, width: 80, height: 80),
+                                  Container(width: 80, height: 80, color: Colors.black26, child: const Icon(Icons.play_circle_outline, color: Colors.white, size: 30)),
+                                ],
+                              ),
+                            ),
+                          ),
 
-                        return GestureDetector(
-                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => FullScreenGallery(images: images, initialIndex: entry.key))),
-                          child: ClipRRect(borderRadius: BorderRadius.circular(8), child: thumbnail),
-                        );
-                      }).toList(),
+                        // 2. 显示图片列表
+                        ...images.asMap().entries.map((entry) {
+                          final String path = entry.value;
+                          final bool isLive = path.toLowerCase().endsWith('.mp4') || path.toLowerCase().endsWith('.mov');
+                          return GestureDetector(
+                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => FullScreenGallery(images: images, initialIndex: entry.key))),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  isLive 
+                                    ? LivePhotoThumbnail(videoPath: path, width: 80, height: 80)
+                                    : Image.file(File(path), width: 80, height: 80, fit: BoxFit.cover),
+                                  if (isLive)
+                                    Container(width: 80, height: 80, color: Colors.black26, child: const Icon(Icons.play_circle_outline, color: Colors.white, size: 30)),
+                                ]
+                              )
+                            ),
+                          );
+                        }),
+                      ],
                     ),
                   ),
               ],
             ),
           ),
         ),
-        
         actions: [
-          // 👈 左侧功能组：生成长图/导出、删除
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              IconButton(
-                icon: const Icon(Icons.ios_share, color: Colors.blueGrey),
-                tooltip: '导出与分享',
-                onPressed: () {
-                  Navigator.pop(context); // 先关闭详情弹窗
-                  _showExportMenu(context, titleStr, contentStr, dateStr); // 呼出分享与长图菜单
-                },
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline, color: Colors.red),
-                tooltip: '移至回收站',
-                onPressed: () {
-                  // 二次确认，防止误触
-                  showDialog(
-                    context: context,
-                    builder: (c) => AlertDialog(
-                      title: const Text('删除提示'),
-                      content: const Text('确定要把这篇记录移至回收站吗？\n(误删可在设置-回收站中找回)'),
-                      actions: [
-                        TextButton(onPressed: () => Navigator.pop(c), child: const Text('取消')),
-                        TextButton(
-                          onPressed: () async {
-                            Navigator.pop(c); // 关掉确认框
-                            Navigator.pop(context); // 关掉详情框
-                            await DatabaseHelper.instance.deleteToTrash(diary['id']); // 移入回收站
-                            onRefresh(); // 刷新主页列表
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('🗑️ 已移至回收站')));
-                            }
-                          },
-                          child: const Text('删除', style: TextStyle(color: Colors.red)),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
+              IconButton(icon: const Icon(Icons.ios_share, color: Colors.blueGrey), tooltip: '导出与分享', onPressed: () { Navigator.pop(context); _showExportMenu(context, titleStr, contentStr, dateStr); }),
+              IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red), tooltip: '移至回收站', onPressed: () {
+                  showDialog(context: context, builder: (c) => AlertDialog(title: const Text('删除提示'), content: const Text('确定要把这篇记录移至回收站吗？'), actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('取消')), TextButton(onPressed: () async { Navigator.pop(c); Navigator.pop(context); await DatabaseHelper.instance.deleteToTrash(diary['id']); onRefresh(); }, child: const Text('删除', style: TextStyle(color: Colors.red)))]));
+              }),
             ],
           ),
-          
-          // 👉 右侧功能组：编辑、关闭
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextButton(
-                onPressed: () async { 
-                  Navigator.pop(context);
-                  await Navigator.push(context, MaterialPageRoute(builder: (context) => DiaryEditPage(
-                    existingDiary: {...diary, 'content': contentStr},
-                  ))); 
-                  onRefresh(); 
-                }, 
-                child: const Text('编 辑', style: TextStyle(color: Colors.teal, fontWeight: FontWeight.bold))
-              ),
+              TextButton(onPressed: () async { Navigator.pop(context); await Navigator.push(context, MaterialPageRoute(builder: (context) => DiaryEditPage(existingDiary: {...diary, 'content': contentStr}))); onRefresh(); }, child: const Text('编 辑', style: TextStyle(color: Colors.teal, fontWeight: FontWeight.bold))),
               TextButton(onPressed: () => Navigator.pop(context), child: const Text('关 闭', style: TextStyle(color: Colors.grey))),
             ],
           ),

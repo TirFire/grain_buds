@@ -1,7 +1,12 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
 import 'package:path/path.dart' as p;
+
+// 💡 核心修复：引入 media_kit，隐藏冲突状态，并加载视频 UI 库
+import 'package:media_kit/media_kit.dart' hide PlayerState;
+import 'package:media_kit_video/media_kit_video.dart';
+
+
 
 class FullScreenGallery extends StatefulWidget {
   final List<String> images;
@@ -40,7 +45,7 @@ class _FullScreenGalleryState extends State<FullScreenGallery> {
           final path = widget.images[index];
           final ext = p.extension(path).toLowerCase();
           
-          // 💡 如果发现扩展名是视频，就调用专属的视频全屏播放器
+          // 如果发现扩展名是视频，就调用专属的 media_kit 视频全屏播放器
           if (ext == '.mp4' || ext == '.mov') {
             return _FullScreenVideoItem(videoPath: path);
           }
@@ -56,7 +61,7 @@ class _FullScreenGalleryState extends State<FullScreenGallery> {
   }
 }
 
-// ================= 子组件：全屏视频播放器 =================
+// ================= 子组件：全屏视频播放器 (media_kit 升级版) =================
 class _FullScreenVideoItem extends StatefulWidget {
   final String videoPath;
   const _FullScreenVideoItem({required this.videoPath});
@@ -65,55 +70,64 @@ class _FullScreenVideoItem extends StatefulWidget {
 }
 
 class _FullScreenVideoItemState extends State<_FullScreenVideoItem> {
-  late VideoPlayerController _controller;
+  late final player = Player();
+  late final controller = VideoController(player);
+  bool _isPlaying = true;
 
   @override
   void initState() {
     super.initState();
-    _controller = VideoPlayerController.file(File(widget.videoPath))
-      ..setLooping(true) // 默认循环播放
-      ..initialize().then((_) {
-        if (mounted) {
-          setState(() {});
-          _controller.play(); // 自动播放
-        }
-      });
+    player.setPlaylistMode(PlaylistMode.loop); // 默认循环播放
+    player.open(Media(widget.videoPath));      // 自动播放
+    
+    // 监听播放状态
+    player.stream.playing.listen((playing) {
+      if (mounted) {
+        setState(() => _isPlaying = playing);
+      }
+    });
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    player.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: _controller.value.isInitialized
-          ? AspectRatio(
-              aspectRatio: _controller.value.aspectRatio,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  VideoPlayer(_controller),
-                  // 💡 点击画面可以暂停/继续，并有平滑的动画图标
-                  GestureDetector(
-                    onTap: () => setState(() => _controller.value.isPlaying ? _controller.pause() : _controller.play()),
-                    child: Container(
-                      color: Colors.transparent,
-                      child: Center(
-                        child: AnimatedOpacity(
-                          opacity: _controller.value.isPlaying ? 0.0 : 1.0,
-                          duration: const Duration(milliseconds: 300),
-                          child: const Icon(Icons.play_circle_fill, color: Colors.white70, size: 80),
-                        ),
-                      ),
-                    ),
-                  )
-                ],
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // 核心视频渲染组件
+          Video(
+            controller: controller, 
+            controls: NoVideoControls // 禁用默认控制栏，我们自己画中间的播放键
+          ),
+          
+          // 点击画面可以暂停/继续，并有平滑的动画图标
+          GestureDetector(
+            onTap: () {
+              if (_isPlaying) {
+                player.pause();
+              } else {
+                player.play();
+              }
+            },
+            child: Container(
+              color: Colors.transparent,
+              child: Center(
+                child: AnimatedOpacity(
+                  opacity: _isPlaying ? 0.0 : 1.0,
+                  duration: const Duration(milliseconds: 300),
+                  child: const Icon(Icons.play_circle_fill, color: Colors.white70, size: 80),
+                ),
               ),
-            )
-          : const CircularProgressIndicator(color: Colors.amber),
+            ),
+          )
+        ],
+      ),
     );
   }
 }
