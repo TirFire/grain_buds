@@ -234,11 +234,18 @@ class DatabaseHelper {
       if (a.isNotEmpty) relAudio = a.first;
     }
 
-    // 生成 MD 文件并写入
-    String safeTitle = ((diary['title'] as String?) ?? "无标题").replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-    String mdName = "${date.toString().substring(0, 10)}_$safeTitle.md";
-    String relPath = _normalizePath(p.join(yearMonth, mdName));
+    // 生成文件名
+    String timeStamp = DateTime.now().millisecondsSinceEpoch.toString();
+    String safeTitle = ((diary['title'] as String?) ?? "无标题")
+        .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
     
+    String mdName = "${date.toString().substring(0, 10)}_$timeStamp" + 
+                    (safeTitle.isNotEmpty ? "_$safeTitle" : "") + ".md";
+    
+    String relPath = _normalizePath(p.join(yearMonth, mdName));
+
+    // 💡 修复：在这里补全物理文件的写入逻辑！
+    // 只有把内容写进硬盘，下次读取时内容才不会消失
     String mdContent = "---\ntitle: ${diary['title']}\ndate: ${diary['date']}\nweather: ${diary['weather']}\nmood: ${diary['mood']}\ntags: ${diary['tags']}\nimages: ${jsonEncode(relImages)}\nvideo: $relVideo\naudio: $relAudio\nattachments: ${jsonEncode(relAtts)}\n---\n${diary['content']}";
     await File(p.join(root, relPath)).writeAsString(mdContent);
 
