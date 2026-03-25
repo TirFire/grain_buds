@@ -755,23 +755,32 @@ class _DiaryEditPageState extends State<DiaryEditPage> {
             body: Column(
             children: [
               // 💡 修复：使用 GestureDetector 包裹，点击下方的空白处也能呼出光标
+              // 💡 终极修复：放弃全局滚动，改为专业的分栏布局，彻底根除输入法定位 Bug！
               Expanded(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent, // 允许手势穿透
-                  onTap: () {
-                    if (!_isArchived) {
-                      FocusScope.of(context).requestFocus(_contentFocusNode);
-                    }
-                  },
-                  child: SingleChildScrollView(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(children: [
-                        _buildHeader(),
-                        const Divider(),
-                        _buildEditor(),
-                        _buildMediaDisplay(),
-                        const SizedBox(height: 300) // 💡 底部留出足够大的空白区域供用户点击
-                      ])),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 16),
+                      _buildHeader(), // 头部信息（标题、日期等）固定在上方
+                      const Divider(),
+                      
+                      // 💡 核心：输入框独占并撑满中间区域，内部独立滚动！这样 Windows 就能精准计算坐标了！
+                      Expanded(
+                        child: _buildEditor(),
+                      ),
+                      
+                      // 媒体展示区移到底部，限制高度，独立滚动，绝不抢占输入框的视野
+                      if (_videoPaths.isNotEmpty || _imagePaths.isNotEmpty || _audioPaths.isNotEmpty || _attachments.isNotEmpty)
+                        Container(
+                          constraints: const BoxConstraints(maxHeight: 220),
+                          margin: const EdgeInsets.only(top: 10, bottom: 10),
+                          child: SingleChildScrollView(
+                            child: _buildMediaDisplay(),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
               if (!_isArchived) const Divider(height: 1, color: Colors.black12),
@@ -899,24 +908,27 @@ class _DiaryEditPageState extends State<DiaryEditPage> {
     ]);
   }
 
-  Widget _buildEditor() {
+ Widget _buildEditor() {
     return TextField(
         focusNode: _contentFocusNode,
         controller: contentController,
         maxLines: null,
+        expands: true, 
+        textAlignVertical: TextAlignVertical.top,
         enabled: !_isArchived,
-        scrollPadding: const EdgeInsets.only(bottom: 150),
+        keyboardType: TextInputType.multiline,
 
-        // 💡 双保险：强制统一全局文本行高基准，帮 Windows 输入法精准定位！
-        strutStyle: const StrutStyle(
-          fontSize: 16,
-          height: 1.6,
-          forceStrutHeight: true,
-        ),
+        scrollPadding: const EdgeInsets.only(bottom: 80),
+        
         decoration: InputDecoration(
             hintText: _isArchived ? "内容已归档锁定" : "记录这一刻...",
-            border: InputBorder.none),
-        style: const TextStyle(fontSize: 16, height: 1.6));
+            border: InputBorder.none,
+
+            contentPadding: const EdgeInsets.only(bottom: 40, top: 10), 
+        ),
+        
+        style: const TextStyle(fontSize: 16, fontFamily: 'Microsoft YaHei'),
+    );
   }
 
   Widget _buildToolbar() {
