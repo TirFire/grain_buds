@@ -425,7 +425,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _checkForUpdates(BuildContext context,
       {bool showToast = false}) async {
-    const String currentVersion = "1.0.0";
+    const String currentVersion = "1.1.0";
     const String versionUrl =
         "https://raw.githubusercontent.com/TirFire/grain_buds/refs/heads/main/version.txt";
 
@@ -585,7 +585,7 @@ class _SettingsPageState extends State<SettingsPage> {
             const SizedBox(height: 16),
             const Text("GrainBuds (小满日记)",
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-            const Text("v 1.0.0", style: TextStyle(color: Colors.grey)),
+            const Text("v 1.1.0", style: TextStyle(color: Colors.grey)),
             const Divider(height: 30),
             const Text("数据 100% 存储于本地，守护每一颗闪念的种子。",
                 textAlign: TextAlign.center, style: TextStyle(fontSize: 13)),
@@ -843,7 +843,7 @@ class _SettingsPageState extends State<SettingsPage> {
               leading: const Icon(Icons.system_update_alt),
               title: const Text('检查版本更新'),
               subtitle:
-                  const Text('当前版本 v1.0.0，获取最新功能与修复', style: subtitleStyle),
+                  const Text('当前版本 v1.1.0，获取最新功能与修复', style: subtitleStyle),
               onTap: () => _checkForUpdates(context, showToast: true)),
 
           const SizedBox(height: 60),

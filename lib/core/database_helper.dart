@@ -305,18 +305,28 @@ class DatabaseHelper {
     try { newVids = List<String>.from(jsonDecode((diary['videoPaths'] as String?) ?? '[]')); } catch(_) {}
     try { newAuds = List<String>.from(jsonDecode((diary['audioPaths'] as String?) ?? '[]')); } catch(_) {}
 
-    // 3. 物理粉碎被抛弃的孤儿文件 (通过 p.normalize() 统一斜杠，杜绝 Windows 误杀)
+    // 💡 异步安全删除工具：延迟 500ms 等待 UI 释放文件锁，且报错也不会卡死主线程
+    void safeDeleteBackground(String path) {
+      Future.delayed(const Duration(milliseconds: 500), () async {
+        try {
+          File f = File(path);
+          if (await f.exists()) await f.delete();
+        } catch (_) {} // 即使被系统占用删不掉，也静默忽略，绝对不影响数据库更新
+      });
+    }
+
+    // 3. 物理粉碎被抛弃的孤儿文件 (异步处理，彻底告别死锁卡顿！)
     List<String> safeNewImgs = newImgs.map((e) => p.normalize(e)).toList();
-    for (String oldImg in oldImgs) { if (!safeNewImgs.contains(p.normalize(oldImg))) { File f = File(oldImg); if (f.existsSync()) f.deleteSync(); } }
+    for (String oldImg in oldImgs) { if (!safeNewImgs.contains(p.normalize(oldImg))) safeDeleteBackground(oldImg); }
     
     List<String> safeNewAtts = newAtts.map((e) => p.normalize(e)).toList();
-    for (String oldAtt in oldAtts) { if (!safeNewAtts.contains(p.normalize(oldAtt))) { File f = File(oldAtt); if (f.existsSync()) f.deleteSync(); } }
+    for (String oldAtt in oldAtts) { if (!safeNewAtts.contains(p.normalize(oldAtt))) safeDeleteBackground(oldAtt); }
 
     List<String> safeNewVids = newVids.map((e) => p.normalize(e)).toList();
-    for (String oldVid in oldVids) { if (!safeNewVids.contains(p.normalize(oldVid))) { File f = File(oldVid); if (f.existsSync()) f.deleteSync(); } }
+    for (String oldVid in oldVids) { if (!safeNewVids.contains(p.normalize(oldVid))) safeDeleteBackground(oldVid); }
 
     List<String> safeNewAuds = newAuds.map((e) => p.normalize(e)).toList();
-    for (String oldAud in oldAuds) { if (!safeNewAuds.contains(p.normalize(oldAud))) { File f = File(oldAud); if (f.existsSync()) f.deleteSync(); } }
+    for (String oldAud in oldAuds) { if (!safeNewAuds.contains(p.normalize(oldAud))) safeDeleteBackground(oldAud); }
     // =============================================================
 
     // 4. 将最新插入的文件，按月存入本地的 yearMonth/assets 专属文件夹中
@@ -377,32 +387,37 @@ class DatabaseHelper {
        final meta = list.first;
        final String? mdPath = meta['md_path'] as String?;
        if (mdPath != null) {
-           File mdFile = File(p.join(root, mdPath));
-           if (mdFile.existsSync()) {
-               final fullDiary = await _readMdFile(meta);
-               List<String> imgs = []; List<String> atts = [];
-               List<String> vids = []; List<String> auds = [];
-               
-               // 💡 修复：全面解析四大媒体数组，囊括新旧格式
-               try { imgs = List<String>.from(jsonDecode((fullDiary['imagePath'] as String?) ?? '[]')); } catch(_) {}
-               try { atts = List<String>.from(jsonDecode((fullDiary['attachments'] as String?) ?? '[]')); } catch(_) {}
-               try { vids = List<String>.from(jsonDecode((fullDiary['videoPaths'] as String?) ?? '[]')); } catch(_) {
-                 if (fullDiary['videoPath'] != null) vids.add(fullDiary['videoPath'] as String);
-               }
-               try { auds = List<String>.from(jsonDecode((fullDiary['audioPaths'] as String?) ?? '[]')); } catch(_) {
-                 if (fullDiary['audioPath'] != null) auds.add(fullDiary['audioPath'] as String);
-               }
-               
-               // 物理粉碎所有数组里的源文件
-               for (String img in imgs) { File f = File(img); if (f.existsSync()) f.deleteSync(); }
-               for (String att in atts) { File f = File(att); if (f.existsSync()) f.deleteSync(); }
-               for (String vid in vids) { File f = File(vid); if (f.existsSync()) f.deleteSync(); }
-               for (String aud in auds) { File f = File(aud); if (f.existsSync()) f.deleteSync(); }
-               
-               mdFile.deleteSync();
+           final fullDiary = await _readMdFile(meta);
+           List<String> imgs = []; List<String> atts = [];
+           List<String> vids = []; List<String> auds = [];
+           
+           try { imgs = List<String>.from(jsonDecode((fullDiary['imagePath'] as String?) ?? '[]')); } catch(_) {}
+           try { atts = List<String>.from(jsonDecode((fullDiary['attachments'] as String?) ?? '[]')); } catch(_) {}
+           try { vids = List<String>.from(jsonDecode((fullDiary['videoPaths'] as String?) ?? '[]')); } catch(_) {
+             if (fullDiary['videoPath'] != null) vids.add(fullDiary['videoPath'] as String);
            }
+           try { auds = List<String>.from(jsonDecode((fullDiary['audioPaths'] as String?) ?? '[]')); } catch(_) {
+             if (fullDiary['audioPath'] != null) auds.add(fullDiary['audioPath'] as String);
+           }
+           
+           // 💡 引入异步安全删除工具（即使文件被锁报错，也不会中断后续流程）
+           void safeDeleteBackground(String path) {
+             Future.delayed(const Duration(milliseconds: 500), () async {
+               try { File f = File(path); if (await f.exists()) await f.delete(); } catch (_) {}
+             });
+           }
+
+           // 物理粉碎所有数组里的源文件 (改为后台静默删除)
+           for (String img in imgs) { safeDeleteBackground(img); }
+           for (String att in atts) { safeDeleteBackground(att); }
+           for (String vid in vids) { safeDeleteBackground(vid); }
+           for (String aud in auds) { safeDeleteBackground(aud); }
+           
+           // 粉碎 md 文件
+           safeDeleteBackground(p.join(root, mdPath));
        }
     }
+    // 💡 核心保障：无论物理文件有没有被锁住，数据库记录 100% 被销毁！用户界面瞬间清爽！
     return await db.delete('diaries', where: 'id = ?', whereArgs: [id]);
   }
 
