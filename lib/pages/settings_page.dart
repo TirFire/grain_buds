@@ -1,10 +1,8 @@
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // 💡 新增：用于复制路径到剪贴板
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_selector/file_selector.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'package:intl/intl.dart';
 import 'package:archive/archive_io.dart';
@@ -30,12 +28,23 @@ class _SettingsPageState extends State<SettingsPage> {
   final _questionController = TextEditingController();
   final _answerController = TextEditingController();
   String _cloudSyncPath = "";
-  String _localDataPath = ""; // 💡 新增：存储本地数据文件夹路径
+  String _localDataPath = "";
 
   // 外观与交互状态
   bool _isDark = false;
   bool _isEyeCare = false;
-  bool _typingSound = false;
+
+  // 提供 8 种精美的莫兰迪/高级色系供用户选择
+  final List<Color> _availableColors = [
+    Colors.teal,
+    Colors.blue,
+    Colors.indigo,
+    Colors.deepPurple,
+    Colors.pink,
+    Colors.orange,
+    Colors.brown,
+    Colors.blueGrey
+  ];
 
   @override
   void initState() {
@@ -46,7 +55,6 @@ class _SettingsPageState extends State<SettingsPage> {
   // ================= 1. 配置加载与保存 =================
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    // 💡 获取数据库定义的数据根目录
     final root = await DatabaseHelper.instance.rootDir;
 
     setState(() {
@@ -57,8 +65,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _cloudSyncPath = prefs.getString('cloud_sync_path') ?? '';
       _isDark = prefs.getBool('is_dark') ?? false;
       _isEyeCare = prefs.getBool('is_eye_care') ?? false;
-      _typingSound = prefs.getBool('typing_sound') ?? false;
-      _localDataPath = root; // 💡 赋值本地路径
+      _localDataPath = root;
     });
   }
 
@@ -102,16 +109,63 @@ class _SettingsPageState extends State<SettingsPage> {
     globalEyeCareMode.value = isEyeCare;
   }
 
-  Future<void> _toggleTypingSound(bool enable) async {
-    setState(() => _typingSound = enable);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('typing_sound', enable);
-    globalEnableTypingSound = enable;
+
+
+  void _showThemeColorPicker(BuildContext context) {
+    showModalBottomSheet(
+        context: context,
+        shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+        builder: (c) => SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text("选择全局主题强调色",
+                        style: TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 20),
+                    Wrap(
+                      spacing: 20,
+                      runSpacing: 20,
+                      children: _availableColors
+                          .map((color) => GestureDetector(
+                                onTap: () async {
+                                  globalThemeColor.value = color;
+                                  final prefs =
+                                      await SharedPreferences.getInstance();
+                                  await prefs.setInt('themeColor', color.value);
+                                  if (mounted) Navigator.pop(c);
+                                },
+                                child: Container(
+                                  width: 50,
+                                  height: 50,
+                                  decoration: BoxDecoration(
+                                    color: color,
+                                    shape: BoxShape.circle,
+                                    border: globalThemeColor.value.value ==
+                                            color.value
+                                        ? Border.all(
+                                            color: Colors.black87, width: 3)
+                                        : null,
+                                  ),
+                                  child: globalThemeColor.value.value ==
+                                          color.value
+                                      ? const Icon(Icons.check,
+                                          color: Colors.white)
+                                      : null,
+                                ),
+                              ))
+                          .toList(),
+                    )
+                  ],
+                ),
+              ),
+            ));
   }
 
   // ================= 3. 导入、备份与本地路径 =================
-
-  // 💡 新增：一键打开本地数据文件夹
   Future<void> _openLocalDataFolder() async {
     if (_localDataPath.isEmpty) return;
     try {
@@ -122,7 +176,6 @@ class _SettingsPageState extends State<SettingsPage> {
         throw Exception('系统不支持直接打开该路径');
       }
     } catch (e) {
-      // 容错处理：如果系统拦截无法直接打开，就复制到剪贴板
       await Clipboard.setData(ClipboardData(text: _localDataPath));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -165,10 +218,14 @@ class _SettingsPageState extends State<SettingsPage> {
         } catch (_) {}
 
         final diaryData = {
-          'title': title, 'content': content, 'date': date,
-          'weather': "sunny", // 👈 把 "☀️" 换成 "sunny"
-          'mood': "happy", // 👈 把 "😊" 换成 "happy"
-          'tags': '[]', 'imagePath': '[]', 'type': 0
+          'title': title,
+          'content': content,
+          'date': date,
+          'weather': "sunny",
+          'mood': "happy",
+          'tags': '[]',
+          'imagePath': '[]',
+          'type': 0
         };
         await DatabaseHelper.instance.insertDiary(diaryData);
         successCount++;
@@ -181,7 +238,7 @@ class _SettingsPageState extends State<SettingsPage> {
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('🎉 成功导入 $successCount 篇日记！'),
-          backgroundColor: Colors.teal));
+          backgroundColor: Theme.of(context).primaryColor));
     }
   }
 
@@ -274,7 +331,7 @@ class _SettingsPageState extends State<SettingsPage> {
         if (res != null) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
               content: Text('✅ 备份包已成功保存至:\n$savePath'),
-              backgroundColor: Colors.teal));
+              backgroundColor: Theme.of(context).primaryColor));
         } else {
           ScaffoldMessenger.of(context)
               .showSnackBar(const SnackBar(content: Text('❌ 导出失败，请检查目录权限')));
@@ -289,17 +346,16 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  // ================= 4. 网盘与更新逻辑 =================
-  // 💡 优化：异步解耦，防止调用 Windows 目录窗口时卡顿
+  // ================= 4. 网盘与弹窗 =================
   Future<void> _pickCloudDirectory() async {
-    // 等待 UI 动画播完
     await Future.delayed(const Duration(milliseconds: 150));
-    
     final String? directoryPath = await getDirectoryPath();
     if (directoryPath != null) {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('cloud_sync_path', directoryPath);
-      setState(() { _cloudSyncPath = directoryPath; });
+      setState(() {
+        _cloudSyncPath = directoryPath;
+      });
     }
   }
 
@@ -312,6 +368,59 @@ class _SettingsPageState extends State<SettingsPage> {
     if (mounted)
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('🚀 成功推送到网盘！')));
+  }
+
+  void _showCloudSyncGuide(BuildContext context) {
+    showDialog(
+        context: context,
+        builder: (c) => AlertDialog(
+              title: const Text("☁️ 如何实现多设备无感同步？"),
+              content: const SingleChildScrollView(
+                child: Text(
+                    "1. 在电脑上下载并安装【百度网盘】、【坚果云】或【OneDrive】等客户端。\n\n2. 点击日记的“网盘同步”，选中云盘在电脑里生成的本地同步文件夹。\n\n3. 每次写完日记点击右侧的【推送备份】按钮，数据就会被打包到该文件夹中并自动同步到云端！\n\n4. 在新电脑上，从这个压缩包恢复即可。"),
+              ),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(c),
+                    child: const Text("我知道了"))
+              ],
+            ));
+  }
+
+  void _showDonateDialog(BuildContext context) {
+    showDialog(
+        context: context,
+        builder: (c) => AlertDialog(
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text("☕️ 请开发者喝杯咖啡",
+                      style:
+                          TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 15),
+                  const Text("GrainBuds 功能免费无广。如果它帮到了你，欢迎赞助支持服务器和证书费用~",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey)),
+                  const SizedBox(height: 20),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.asset(
+                      'assets/images/donate_qr.png',
+                      width: 200,
+                      height: 200,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text("感恩每一份善意 ❤️",
+                      style: TextStyle(
+                          color: Theme.of(context).primaryColor,
+                          fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ));
   }
 
   Future<void> _checkForUpdates(BuildContext context,
@@ -333,8 +442,9 @@ class _SettingsPageState extends State<SettingsPage> {
         if (latestVersion != currentVersion && mounted) {
           _showUpdateDialog(context, latestVersion);
         } else if (showToast && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text("✨ 已是最新版本"), backgroundColor: Colors.teal));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: const Text("✨ 已是最新版本"),
+              backgroundColor: Theme.of(context).primaryColor));
         }
       }
     } catch (e) {
@@ -363,14 +473,14 @@ class _SettingsPageState extends State<SettingsPage> {
                 await launchUrl(url, mode: LaunchMode.externalApplication);
                 if (context.mounted) Navigator.pop(c);
               } else {
-                if (context.mounted) {
+                if (context.mounted)
                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                       content: Text("无法打开浏览器，请手动前往 GitHub 检查更新")));
-                }
               }
             },
             style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.teal, foregroundColor: Colors.white),
+                backgroundColor: Theme.of(context).primaryColor,
+                foregroundColor: Colors.white),
             child: const Text("立即前往下载"),
           ),
         ],
@@ -378,41 +488,6 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  void _showAboutDetail(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.eco, size: 60, color: Colors.teal),
-            const SizedBox(height: 16),
-            const Text("GrainBuds (小满日记)",
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-            const Text("v 1.0.0", style: TextStyle(color: Colors.grey)),
-            const Divider(height: 30),
-            const Text("数据 100% 存储于本地，守护每一颗闪念的种子。",
-                textAlign: TextAlign.center, style: TextStyle(fontSize: 13)),
-            const SizedBox(height: 20),
-            const Text("Developed by 叁火同学",
-                style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.teal,
-                    fontWeight: FontWeight.bold)),
-            const Text("© 2026 GrainBuds Studio",
-                style: TextStyle(fontSize: 10, color: Colors.grey)),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context), child: const Text("确定"))
-        ],
-      ),
-    );
-  }
-
-  // ================= 5. 精美的功能介绍弹窗 =================
   void _showFeatureIntro(BuildContext context) {
     showDialog(
       context: context,
@@ -478,7 +553,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 alignment: Alignment.centerRight,
                 child: ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.teal,
+                    backgroundColor: Theme.of(context).primaryColor,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(
                         horizontal: 30, vertical: 12),
@@ -494,6 +569,40 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  void _showAboutDetail(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.eco, size: 60, color: Theme.of(context).primaryColor),
+            const SizedBox(height: 16),
+            const Text("GrainBuds (小满日记)",
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            const Text("v 1.0.0", style: TextStyle(color: Colors.grey)),
+            const Divider(height: 30),
+            const Text("数据 100% 存储于本地，守护每一颗闪念的种子。",
+                textAlign: TextAlign.center, style: TextStyle(fontSize: 13)),
+            const SizedBox(height: 20),
+            Text("Developed by 叁火同学",
+                style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).primaryColor,
+                    fontWeight: FontWeight.bold)),
+            const Text("© 2026 GrainBuds Studio",
+                style: TextStyle(fontSize: 10, color: Colors.grey)),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context), child: const Text("确定"))
+        ],
       ),
     );
   }
@@ -559,12 +668,24 @@ class _SettingsPageState extends State<SettingsPage> {
               secondary: const Icon(Icons.remove_red_eye),
               value: _isEyeCare,
               onChanged: _toggleEyeCare),
-          SwitchListTile(
-              title: const Text('打字机音效'),
-              subtitle: const Text('沉浸式写作体验，伴随清脆键盘敲击音（正在开发中）', style: subtitleStyle),
-              secondary: const Icon(Icons.keyboard),
-              value: _typingSound,
-              onChanged: _toggleTypingSound),
+
+          // 💡 动态 UI 主题颜色入口
+          ValueListenableBuilder<Color>(
+              valueListenable: globalThemeColor,
+              builder: (context, color, child) {
+                return ListTile(
+                  leading: Icon(Icons.color_lens, color: color),
+                  title: const Text('UI 主题配色'),
+                  subtitle: const Text('自定义软件的强调色与顶部边框', style: subtitleStyle),
+                  trailing: Container(
+                    width: 24,
+                    height: 24,
+                    decoration:
+                        BoxDecoration(color: color, shape: BoxShape.circle),
+                  ),
+                  onTap: () => _showThemeColorPicker(context),
+                );
+              }),
 
           const Divider(height: 40),
 
@@ -616,10 +737,8 @@ class _SettingsPageState extends State<SettingsPage> {
               child: Text("数据管理",
                   style: TextStyle(
                       color: primaryColor, fontWeight: FontWeight.bold))),
-
-          // 💡 核心新增：本地数据文件夹快速访问入口
           ListTile(
-            leading: const Icon(Icons.folder_open, color: Colors.teal),
+            leading: Icon(Icons.folder_open, color: primaryColor),
             title: const Text('本地数据文件夹'),
             subtitle: Text('日记和媒体均保存在此 (点击打开，长按复制):\n$_localDataPath',
                 style: subtitleStyle),
@@ -633,10 +752,19 @@ class _SettingsPageState extends State<SettingsPage> {
                     .showSnackBar(const SnackBar(content: Text('✅ 路径已复制到剪贴板')));
             },
           ),
-
           ListTile(
-              leading: const Icon(Icons.cloud_sync),
-              title: const Text('网盘同步'),
+              leading: const Icon(Icons.cloud_sync, color: Colors.blue),
+              title: Row(
+                children: [
+                  const Text('网盘同步'),
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: () => _showCloudSyncGuide(context),
+                    child: const Icon(Icons.help_outline,
+                        size: 16, color: Colors.grey),
+                  )
+                ],
+              ),
               subtitle: Text(
                   _cloudSyncPath.isEmpty
                       ? "选择坚果云等网盘的本地目录，实现自动备份"
@@ -648,7 +776,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   onPressed: _syncToCloud,
                   tooltip: "立即推送备份")),
           ListTile(
-              leading: const Icon(Icons.archive_outlined, color: Colors.blue),
+              leading: const Icon(Icons.archive_outlined, color: Colors.teal),
               title: const Text('导出完整备份包'),
               subtitle: const Text('将所有日记及多媒体附件打包为 .zip 文件并保存到电脑',
                   style: subtitleStyle),
@@ -667,6 +795,15 @@ class _SettingsPageState extends State<SettingsPage> {
                   const Text('支持批量导入 .md 或 .txt 格式的本地文件', style: subtitleStyle),
               onTap: _importDiaries),
           ListTile(
+              leading: const Icon(Icons.edit_document, color: Colors.indigo),
+              title: const Text('日记模板管理'),
+              subtitle: const Text('添加、修改或删除常用的写作模板', style: subtitleStyle),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (context) => const TemplateMgrPage()))),
+          ListTile(
               leading: const Icon(Icons.delete_outline, color: Colors.red),
               title: const Text('回收站'),
               subtitle: const Text('找回被删除的日记，避免误删遗失', style: subtitleStyle),
@@ -682,7 +819,12 @@ class _SettingsPageState extends State<SettingsPage> {
               child: Text("关于",
                   style: TextStyle(
                       color: primaryColor, fontWeight: FontWeight.bold))),
-
+          ListTile(
+              leading: const Icon(Icons.coffee, color: Colors.brown),
+              title: const Text('赞助开发者'),
+              subtitle: const Text('用爱发电，感谢支持', style: subtitleStyle),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => _showDonateDialog(context)),
           ListTile(
               leading: const Icon(Icons.auto_awesome, color: Colors.amber),
               title: const Text('功能特性介绍'),
@@ -690,13 +832,13 @@ class _SettingsPageState extends State<SettingsPage> {
                   const Text('了解 GrainBuds 的全新多媒体与写作功能', style: subtitleStyle),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => _showFeatureIntro(context)),
-
           ListTile(
               leading: const Icon(Icons.info_outline),
               title: const Text('关于 GrainBuds'),
               subtitle: const Text('查看软件设计理念与开发者信息', style: subtitleStyle),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => _showAboutDetail(context)),
+          
           ListTile(
               leading: const Icon(Icons.system_update_alt),
               title: const Text('检查版本更新'),

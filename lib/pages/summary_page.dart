@@ -1,12 +1,14 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:screenshot/screenshot.dart';
-import 'package:share_plus/share_plus.dart';
+// 💡 同样的，引入路径处理和打开文件的库
 import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
+import 'package:open_filex/open_filex.dart';
 import 'package:intl/intl.dart';
 
 import '../core/database_helper.dart';
-import '../core/constants.dart'; // 💡 引入状态码解析字典
+import '../core/constants.dart';
 
 class SummaryPage extends StatefulWidget {
   const SummaryPage({super.key});
@@ -50,7 +52,6 @@ class _SummaryPageState extends State<SummaryPage> {
       words +=
           (d['content'] as String? ?? "").replaceAll(RegExp(r'\s+'), '').length;
 
-      // 💡 核心修复：统计前先把数据库里的状态码解析成直观的表情
       String mood = AppConstants.getMoodEmoji(d['mood'] as String?);
       String weather = AppConstants.getWeatherEmoji(d['weather'] as String?);
 
@@ -86,21 +87,41 @@ class _SummaryPageState extends State<SummaryPage> {
 
   Future<void> _captureAndShare() async {
     setState(() => _isCapturing = true);
+
     try {
-      final imageBytes = await _screenshotController.capture(pixelRatio: 2.0);
+      await Future.delayed(const Duration(milliseconds: 300));
+      
+      final imageBytes = await _screenshotController.capture(pixelRatio: 1.5);
+      
       if (imageBytes != null) {
-        final directory = await getTemporaryDirectory();
-        final imagePath = await File(
-                '${directory.path}/diary_summary_${DateTime.now().millisecondsSinceEpoch}.png')
-            .create();
-        await imagePath.writeAsBytes(imageBytes);
-        await Share.shareXFiles([XFile(imagePath.path)],
-            text: '这是我的年度时光日记总结，与你分享！');
+        final directory = await getApplicationDocumentsDirectory();
+        final exportDir = Directory(p.join(directory.path, 'MyDiary_Data', 'Exports'));
+        if (!await exportDir.exists()) {
+          await exportDir.create(recursive: true);
+        }
+
+        final String fileName = '年度海报_${DateTime.now().millisecondsSinceEpoch}.png';
+        final String savePath = p.join(exportDir.path, fileName);
+        
+        await File(savePath).writeAsBytes(imageBytes);
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('🎉 年度海报已成功保存！'),
+            backgroundColor: Colors.amber.shade700,
+            duration: const Duration(seconds: 6),
+            action: SnackBarAction(
+              label: '立即打开查看',
+              textColor: Colors.white,
+              onPressed: () => OpenFilex.open(savePath),
+            ),
+          ));
+        }
+      } else {
+         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('截取失败，请稍微上下滑动页面再试')));
       }
     } catch (e) {
-      if (mounted)
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('生成长图失败: $e')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('生成海报失败: $e'), backgroundColor: Colors.red));
     } finally {
       if (mounted) setState(() => _isCapturing = false);
     }
@@ -137,8 +158,8 @@ class _SummaryPageState extends State<SummaryPage> {
             else
               ElevatedButton.icon(
                 onPressed: _captureAndShare,
-                icon: const Icon(Icons.share),
-                label: const Text("生成海报并分享",
+                icon: const Icon(Icons.download), // 💡 图标改为下载
+                label: const Text("保存海报到电脑",
                     style:
                         TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 style: ElevatedButton.styleFrom(
@@ -237,7 +258,7 @@ class _SummaryPageState extends State<SummaryPage> {
                 child: Column(children: [
               Icon(Icons.fingerprint, color: Colors.amber, size: 50),
               SizedBox(height: 10),
-              Text("—— 由「我的时光印记」生成 ——",
+              Text("—— 由「GrainBuds-小满日记」生成 ——",
                   style: TextStyle(
                       color: Colors.white38, fontSize: 12, letterSpacing: 2))
             ]))

@@ -1,4 +1,4 @@
-name: my_diary
+name: grain_buds
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 version: 1.0.0+1
 
 environment:
-  sdk: ">=3.1.0 <4.0.0"  # 💡 修复了致命错误：这里之前是 ^3.11.3 导致插件全军覆没！
+  sdk: ">=3.1.0 <4.0.0"  
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -65,6 +65,7 @@ dependencies:
   geocoding: ^4.0.0
   http: ^1.6.0
   url_launcher: ^6.2.0
+  window_manager: ^0.5.1
 
 dev_dependencies:
   flutter_test:
@@ -86,6 +87,10 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/images/donate_qr.png
+
 
   # To add assets to your application, add an assets section, like this:
   # assets:
@@ -125,3 +130,4 @@ flutter_launcher_icons:
     generate: true
     icon_size: 48
   image_path: "assets/icon.png"
+  

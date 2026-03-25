@@ -19,6 +19,7 @@ import '../core/encryption_service.dart';
 import 'full_screen_gallery.dart';
 import '../pages/diary_share_page.dart';
 import 'package:markdown/markdown.dart' as md;
+import 'package:open_filex/open_filex.dart';
 
 class DiaryCard extends StatelessWidget {
   final Map<String, dynamic> diary;
@@ -27,6 +28,7 @@ class DiaryCard extends StatelessWidget {
   final bool isSelected;
   final Function(bool)? onSelected;
   final VoidCallback? onLongPress;
+  final String heroTagPrefix;
 
   const DiaryCard(
       {super.key,
@@ -35,7 +37,8 @@ class DiaryCard extends StatelessWidget {
       this.isSelectionMode = false,
       this.isSelected = false,
       this.onSelected,
-      this.onLongPress});
+      this.onLongPress,
+      this.heroTagPrefix = ''});
 
   void _handleOpen(BuildContext context) {
     if (diary['is_locked'] == 1) {
@@ -163,14 +166,12 @@ class DiaryCard extends StatelessWidget {
                   subtitle: const Text("排版为长图海报，保存相册或分享朋友圈"),
                   onTap: () {
                     Navigator.pop(c);
-                    Future.delayed(const Duration(milliseconds: 100), () {
-                      if (context.mounted)
-                        Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                                builder: (_) => DiarySharePage(
-                                    diary: diary, decryptedContent: content)));
-                    });
+                    // 💡 修复：移除多余的延时和拦截，直接使用卡片自带的稳定 context 跳转
+                    Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => DiarySharePage(
+                                diary: diary, decryptedContent: content)));
                   }),
               ListTile(
                   leading: const Icon(Icons.picture_as_pdf, color: Colors.red),
@@ -210,140 +211,160 @@ class DiaryCard extends StatelessWidget {
   void _showDetail(BuildContext context, String? decryptedContent,
       {String? pwdKey}) {
     final images = _parseList(diary['imagePath'] as String?);
-    final String? videoPath =
-        (diary['videoPath'] != null && diary['videoPath'].toString().isNotEmpty)
-            ? diary['videoPath']
-            : null;
+    List<String> videos = [];
+    List<String> audios = [];
+    try { videos = List<String>.from(jsonDecode(diary['videoPaths'] as String? ?? '[]')); } catch(_) {}
+    try { audios = List<String>.from(jsonDecode(diary['audioPaths'] as String? ?? '[]')); } catch(_) {}
+    if (videos.isEmpty && diary['videoPath'] != null && diary['videoPath'].toString().isNotEmpty) videos.add(diary['videoPath']);
+    if (audios.isEmpty && diary['audioPath'] != null && diary['audioPath'].toString().isNotEmpty) audios.add(diary['audioPath']);
+    final attachments = _parseList(diary['attachments'] as String?);
 
     final dateStr = diary['date'] as String? ?? DateTime.now().toString();
     final titleStr = diary['title'] as String? ?? '无标题';
     final contentStr = decryptedContent ?? (diary['content'] as String? ?? '');
 
-    showDialog(
+    showGeneralDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // 💡 福利：详情窗内显示天气与心情！
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                  "${AppConstants.getWeatherEmoji(diary['weather'])} ${AppConstants.getMoodEmoji(diary['mood'])} ",
-                  style: const TextStyle(fontSize: 18)),
-              Expanded(child: Text(titleStr)),
-            ],
-          ),
-          if (diary['location'] != null) ...[
-            const SizedBox(height: 4),
-            Row(children: [
-              const Icon(Icons.location_on, size: 14, color: Colors.teal),
-              const SizedBox(width: 4),
-              Text(diary['location'],
-                  style: const TextStyle(
-                      fontSize: 12,
-                      color: Colors.teal,
-                      fontWeight: FontWeight.normal))
-            ])
-          ]
-        ]),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: SingleChildScrollView(
-            child: Column(
+      barrierColor: Colors.black54,
+      barrierDismissible: true,
+      barrierLabel: '关闭',
+      transitionDuration: const Duration(milliseconds: 250), // 💡 加快动画速度，250ms最干脆
+      transitionBuilder: (context, animation, secondaryAnimation, child) {
+        // 极简流畅的缩放淡入
+        return ScaleTransition(
+          scale: animation.drive(Tween(begin: 0.95, end: 1.0).chain(CurveTween(curve: Curves.easeOut))),
+          child: FadeTransition(opacity: animation, child: child),
+        );
+      },
+      pageBuilder: (dialogContext, animation, secondaryAnimation) => AlertDialog(
+          title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(
               crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
               children: [
-                MarkdownBody(
-                  data: contentStr,
-                  selectable: true,
-                  extensionSet: md.ExtensionSet.gitHubFlavored,
-                  onTapLink: (text, href, title) async {
-                    if (href != null) {
-                      final Uri url = Uri.parse(href);
-                      if (await canLaunchUrl(url))
-                        await launchUrl(url,
-                            mode: LaunchMode.externalApplication);
-                    }
-                  },
-                ),
-                if (images.isNotEmpty || videoPath != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 15),
-                    child: Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        if (videoPath != null)
-                          _buildBrowseItem(context, videoPath, isVideo: true),
-                        ...images.asMap().entries.map((entry) =>
-                            _buildBrowseItem(context, entry.value,
-                                isVideo: false,
-                                index: entry.key,
-                                allImages: images)),
-                      ],
-                    ),
-                  ),
+                Text(
+                    "${AppConstants.getWeatherEmoji(diary['weather'])} ${AppConstants.getMoodEmoji(diary['mood'])} ",
+                    style: const TextStyle(fontSize: 18)),
+                Expanded(child: Text(titleStr)),
               ],
             ),
-          ),
-        ),
-        actions: [
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            IconButton(
-                icon: const Icon(Icons.ios_share, color: Colors.blueGrey),
-                tooltip: '导出与分享',
-                onPressed: () {
-                  Navigator.pop(context);
-                  _showExportMenu(context, titleStr, contentStr, dateStr);
-                }),
-            IconButton(
-                icon: const Icon(Icons.delete_outline, color: Colors.red),
-                tooltip: '移至回收站',
-                onPressed: () {
-                  showDialog(
-                      context: context,
-                      builder: (c) => AlertDialog(
-                              title: const Text('删除提示'),
-                              content: const Text('确定要把这篇记录移至回收站吗？'),
-                              actions: [
-                                TextButton(
-                                    onPressed: () => Navigator.pop(c),
-                                    child: const Text("取消")),
-                                TextButton(
-                                    onPressed: () async {
-                                      Navigator.pop(c);
-                                      Navigator.pop(context);
-                                      await DatabaseHelper.instance
-                                          .deleteToTrash(diary['id']);
-                                      onRefresh();
-                                    },
-                                    child: const Text('删除',
-                                        style: TextStyle(color: Colors.red)))
-                              ]));
-                })
+            if (diary['location'] != null) ...[
+              const SizedBox(height: 4),
+              Row(children: [
+                const Icon(Icons.location_on, size: 14, color: Colors.teal),
+                const SizedBox(width: 4),
+                Text(diary['location'],
+                    style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.teal,
+                        fontWeight: FontWeight.normal))
+              ])
+            ]
           ]),
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            TextButton(
-                onPressed: () async {
-                  Navigator.pop(context);
-                  await Navigator.push(
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  MarkdownBody(
+                    data: contentStr.split('\n').map((line) {
+                      String pLine = line;
+                      int spaceCount = 0;
+                      while (spaceCount < pLine.length &&
+                          (pLine[spaceCount] == ' ' ||
+                              pLine[spaceCount] == '　' ||
+                              pLine[spaceCount] == '\t' ||
+                              pLine[spaceCount] == ' ')) {
+                        spaceCount++;
+                      }
+                      if (spaceCount > 0) {
+                        pLine = '\u3000' * spaceCount + pLine.substring(spaceCount);
+                      }
+                      return pLine;
+                    }).join('\n\n'),
+                    selectable: true,
+                    extensionSet: md.ExtensionSet.gitHubFlavored,
+                    onTapLink: (text, href, title) async {
+                      if (href != null) {
+                        final Uri url = Uri.parse(href);
+                        if (await canLaunchUrl(url)) {
+                          await launchUrl(url, mode: LaunchMode.externalApplication);
+                        }
+                      }
+                    },
+                  ),
+                  if (images.isNotEmpty || videos.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 25, bottom: 10),
+                      child: Wrap(
+                        spacing: 8, runSpacing: 8,
+                        children: [
+                          ...videos.asMap().entries.map((entry) => _buildBrowseItem(context, entry.value, isVideo: true, index: entry.key, allImages: videos)),
+                          ...images.asMap().entries.map((entry) => _buildBrowseItem(context, entry.value, isVideo: false, index: entry.key, allImages: images)),
+                        ],
+                      ),
+                    ),
+                  if (audios.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 15),
+                      child: Column(
+                        children: audios.map((path) => Padding(padding: const EdgeInsets.only(bottom: 8), child: MiniAudioPlayer(audioPath: path))).toList(),
+                      ),
+                    ),
+                  if (attachments.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 15),
+                      child: Column(
+                        children: attachments.map((path) {
+                          String fileName = path.split(Platform.pathSeparator).last;
+                          return Card(
+                            elevation: 0,
+                            color: Theme.of(context).primaryColor.withOpacity(0.05),
+                            margin: const EdgeInsets.only(bottom: 6),
+                            child: ListTile(
+                              leading: Icon(Icons.file_present, color: Theme.of(context).primaryColor),
+                              title: Text(fileName, style: const TextStyle(fontSize: 13)),
+                              trailing: const Icon(Icons.open_in_new, size: 16, color: Colors.grey),
+                              onTap: () => OpenFilex.open(path),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              IconButton(icon: const Icon(Icons.ios_share, color: Colors.blueGrey), tooltip: '导出与分享', onPressed: () { Navigator.pop(dialogContext); _showExportMenu(context, titleStr, contentStr, dateStr); }),
+              IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red), tooltip: '移至回收站', onPressed: () {
+                    showDialog(context: dialogContext, builder: (c) => AlertDialog(title: const Text('删除提示'), content: const Text('确定要把这篇记录移至回收站吗？'), actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text("取消")), TextButton(onPressed: () async { Navigator.pop(c); Navigator.pop(dialogContext); await DatabaseHelper.instance.deleteToTrash(diary['id']); onRefresh(); }, child: const Text('删除', style: TextStyle(color: Colors.red)))]));
+                  })
+            ]),
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              TextButton(
+                  onPressed: () async {
+                    Navigator.pop(dialogContext);
+                    
+                    if (!context.mounted) return;
+                    await Navigator.push(
                       context,
                       MaterialPageRoute(
-                          builder: (context) => DiaryEditPage(existingDiary: {
-                                ...diary,
-                                'content': contentStr
-                              })));
-                  onRefresh();
-                },
-                child: const Text('编 辑',
-                    style: TextStyle(
-                        color: Colors.teal, fontWeight: FontWeight.bold))),
-            TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('关 闭', style: TextStyle(color: Colors.grey)))
-          ]),
-        ],
-      ),
+                        builder: (context) => DiaryEditPage(
+                          existingDiary: {...diary, 'content': contentStr},
+                          pwdKey: pwdKey, 
+                        )
+                      ),
+                    );
+                    onRefresh();
+                  },
+                  child: const Text('编 辑', style: TextStyle(color: Colors.teal, fontWeight: FontWeight.bold))),
+              TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('关 闭', style: TextStyle(color: Colors.grey)))
+            ]),
+          ],
+        ),
     );
   }
 
@@ -351,6 +372,7 @@ class DiaryCard extends StatelessWidget {
       {required bool isVideo, int? index, List<String>? allImages}) {
     final bool isLive = path.toLowerCase().endsWith('.mp4') ||
         path.toLowerCase().endsWith('.mov');
+        
     return GestureDetector(
       onTap: () => Navigator.push(
           context,
@@ -363,10 +385,23 @@ class DiaryCard extends StatelessWidget {
         child: Stack(
           alignment: Alignment.center,
           children: [
+            // 💡 修复 1：正确嵌套 errorBuilder 到 Image.file 内部
             isVideo || isLive
                 ? LivePhotoThumbnail(videoPath: path, width: 80, height: 80)
-                : Image.file(File(path),
-                    width: 80, height: 80, fit: BoxFit.cover),
+                : Image.file(
+                    File(path),
+                    width: 80,
+                    height: 80,
+                    fit: BoxFit.cover,
+                    // ✅ 它是 Image.file 的参数，必须在括号内
+                    errorBuilder: (context, error, stackTrace) => Container(
+                        width: 80,
+                        height: 80,
+                        color: Colors.grey.shade200,
+                        child: const Icon(Icons.broken_image, color: Colors.grey)),
+                  ), // 👈 这里是 Image.file 的结束括号
+            
+            // 💡 修复 2：逻辑判断现在回到了 Stack 的 children 列表中
             if (isVideo)
               Container(
                   width: 80,
@@ -395,15 +430,24 @@ class DiaryCard extends StatelessWidget {
     final isLocked = diary['is_locked'] == 1;
     final isNote = (diary['type'] as int? ?? 0) == 1;
     final String dateStr = diary['date'] as String? ?? '';
+    bool isUnknownDate = dateStr.startsWith('1900-01-01');
     final String? updateStr = diary['update_time'] as String?;
     String cTime = "";
     String uTime = "";
+    bool isEdited = false;
     try {
-      if (dateStr.isNotEmpty)
-        cTime = DateFormat('yyyy-MM-dd HH:mm').format(DateTime.parse(dateStr));
-      if (updateStr != null && updateStr.isNotEmpty)
-        uTime =
-            DateFormat('yyyy-MM-dd HH:mm').format(DateTime.parse(updateStr));
+      if (dateStr.isNotEmpty) {
+        DateTime cDate = DateTime.parse(dateStr);
+        cTime = DateFormat('yyyy-MM-dd HH:mm').format(cDate);
+        if (updateStr != null && updateStr.isNotEmpty) {
+          DateTime uDate = DateTime.parse(updateStr);
+          // 💡 修复：如果修改时间距离创建时间超过 2 分钟，才算“被编辑过”
+          if (uDate.difference(cDate).inMinutes > 2) {
+            uTime = DateFormat('yyyy-MM-dd HH:mm').format(uDate);
+            isEdited = true;
+          }
+        }
+      }
     } catch (_) {}
     return Card(
         color: isSelected ? Colors.teal.shade50 : null,
@@ -446,19 +490,25 @@ class DiaryCard extends StatelessWidget {
                               color: Colors.green.shade600, fontSize: 9))),
                   const SizedBox(width: 6)
                 ],
-                // 💡 福利：时间轴/列表缩略图里也直接显示天气和心情！
+                if ((diary['is_archived'] as int? ?? 0) == 1) ...[
+                  Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                      decoration: BoxDecoration(border: Border.all(color: Colors.brown.shade200), borderRadius: BorderRadius.circular(4)),
+                      child: Text("已归档", style: TextStyle(color: Colors.brown.shade600, fontSize: 9))),
+                  const SizedBox(width: 6)
+                ],
+                // 时间轴/列表缩略图里也直接显示天气和心情！
                 Text(
                     "${AppConstants.getWeatherEmoji(diary['weather'])} ${AppConstants.getMoodEmoji(diary['mood'])}  ",
                     style: const TextStyle(fontSize: 12)),
                 Expanded(
                     child: Text(
-                        "创建: $cTime" +
-                            (uTime.isNotEmpty && uTime != cTime
-                                ? "  |  编辑: $uTime"
-                                : ""),
-                        style:
-                            const TextStyle(fontSize: 11, color: Colors.grey),
-                        overflow: TextOverflow.ellipsis))
+                        isUnknownDate 
+                        ? "⏳ 岁月深处的回忆"  // 💡 特殊渲染
+                        : "创建: $cTime" + (isEdited ? "  |  编辑: $uTime" : ""), 
+                        style: TextStyle(fontSize: 11, color: isUnknownDate ? Colors.brown : Colors.grey), 
+                        overflow: TextOverflow.ellipsis
+                              ))
               ])
             ]),
             trailing: isSelectionMode
@@ -487,7 +537,8 @@ class DiaryCard extends StatelessWidget {
                 _handleOpen(context);
               }
             },
-            onLongPress: onLongPress));
+            onLongPress: onLongPress)
+      );
   }
 }
 
@@ -505,35 +556,53 @@ class LivePhotoThumbnail extends StatefulWidget {
 }
 
 class _LivePhotoThumbnailState extends State<LivePhotoThumbnail> {
-  late final player = Player();
-  late final controller = VideoController(player);
+  // 💡 彻底设为可空！
+  Player? _player;
+  VideoController? _controller;
+  bool _isReady = false;
+  bool _fileExists = true;
+
   @override
   void initState() {
     super.initState();
-    player.setVolume(0);
-    player.setPlaylistMode(PlaylistMode.loop);
-    player.open(Media(widget.videoPath));
+    _fileExists = File(widget.videoPath).existsSync();
+
+    if (_fileExists) {
+      // 💡 延迟创建
+      Future.delayed(const Duration(milliseconds: 450), () {
+        if (mounted) {
+          _player = Player();
+          _player!.setVolume(0);
+          _player!.setPlaylistMode(PlaylistMode.loop);
+          _controller = VideoController(_player!);
+          _player!.open(Media(widget.videoPath));
+          setState(() => _isReady = true);
+        }
+      });
+    }
   }
 
   @override
   void dispose() {
-    player.dispose();
+    final p = _player;
+    _player = null;
+    if (p != null) Future.microtask(() => p.dispose());
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (!_fileExists) {
+      return Container(width: widget.width, height: widget.height, color: Colors.grey.shade200, child: const Icon(Icons.videocam_off, color: Colors.grey, size: 30));
+    }
+    // 💡 引擎没准备好之前，显示等待框
+    if (!_isReady || _controller == null) {
+      return Container(width: widget.width, height: widget.height, color: Colors.grey.shade100, child: const Center(child: CircularProgressIndicator(strokeWidth: 2, color: Colors.grey)));
+    }
     return SizedBox(
-        width: widget.width,
-        height: widget.height,
+        width: widget.width, height: widget.height,
         child: Stack(fit: StackFit.expand, children: [
-          FittedBox(
-              fit: BoxFit.cover,
-              child: SizedBox(
-                  width: widget.width,
-                  height: widget.height,
-                  child:
-                      Video(controller: controller, controls: NoVideoControls)))
+          FittedBox(fit: BoxFit.cover, child: SizedBox(width: widget.width, height: widget.height, child: Video(controller: _controller!, controls: NoVideoControls)))
         ]));
   }
 }

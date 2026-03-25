@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
@@ -31,8 +30,9 @@ class _VoiceRecorderDialogState extends State<VoiceRecorderDialog> {
   Future<void> _start() async {
     try {
       if (await _audioRecorder.hasPermission()) {
-        final appDir = await getApplicationDocumentsDirectory();
-        final path = p.join(appDir.path, 'REC_${DateTime.now().millisecondsSinceEpoch}.m4a');
+        // 💡 修复：改用系统的临时缓存文件夹存储生肉录音，拒绝污染用户的文档区
+        final tempDir = await getTemporaryDirectory(); 
+        final path = p.join(tempDir.path, 'REC_${DateTime.now().millisecondsSinceEpoch}.m4a');
 
         const config = RecordConfig(); // 默认高保真配置
 

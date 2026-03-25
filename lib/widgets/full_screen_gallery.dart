@@ -2,11 +2,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
-// 💡 核心修复：引入 media_kit，隐藏冲突状态，并加载视频 UI 库
+// 💡 核心：引入 media_kit 相关库
 import 'package:media_kit/media_kit.dart' hide PlayerState;
 import 'package:media_kit_video/media_kit_video.dart';
-
-
 
 class FullScreenGallery extends StatefulWidget {
   final List<String> images;
@@ -37,7 +35,10 @@ class _FullScreenGalleryState extends State<FullScreenGallery> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(backgroundColor: Colors.black, iconTheme: const IconThemeData(color: Colors.white)),
+      appBar: AppBar(
+        backgroundColor: Colors.black, 
+        iconTheme: const IconThemeData(color: Colors.white)
+      ),
       body: PageView.builder(
         itemCount: widget.images.length,
         controller: _pageController,
@@ -45,15 +46,32 @@ class _FullScreenGalleryState extends State<FullScreenGallery> {
           final path = widget.images[index];
           final ext = p.extension(path).toLowerCase();
           
-          // 如果发现扩展名是视频，就调用专属的 media_kit 视频全屏播放器
+          // 💡 判断如果是视频，则调用下方的视频播放组件
           if (ext == '.mp4' || ext == '.mov') {
             return _FullScreenVideoItem(videoPath: path);
           }
           
-          // 否则当作普通图片/GIF处理
+          // 💡 否则当作普通图片处理，并加入“防红屏装甲”
           return InteractiveViewer(
-            minScale: 1.0, maxScale: 4.0,
-            child: Center(child: Image.file(File(path), fit: BoxFit.contain)),
+            minScale: 1.0, 
+            maxScale: 4.0,
+            child: Center(
+              child: Image.file(
+                File(path), 
+                fit: BoxFit.contain,
+                // 💡 修复：正确配置 errorBuilder 及其内部括号结构
+                errorBuilder: (context, error, stackTrace) {
+                  return const Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.broken_image, color: Colors.white54, size: 60),
+                      SizedBox(height: 16),
+                      Text("图片文件已丢失", style: TextStyle(color: Colors.white54, fontSize: 16)),
+                    ],
+                  );
+                },
+              ),
+            ),
           );
         },
       ),
@@ -61,7 +79,7 @@ class _FullScreenGalleryState extends State<FullScreenGallery> {
   }
 }
 
-// ================= 子组件：全屏视频播放器 (media_kit 升级版) =================
+// ================= 子组件：全屏视频播放器 (带文件存在检查) =================
 class _FullScreenVideoItem extends StatefulWidget {
   final String videoPath;
   const _FullScreenVideoItem({required this.videoPath});
@@ -73,19 +91,20 @@ class _FullScreenVideoItemState extends State<_FullScreenVideoItem> {
   late final player = Player();
   late final controller = VideoController(player);
   bool _isPlaying = true;
+  bool _fileExists = true;
 
   @override
   void initState() {
     super.initState();
-    player.setPlaylistMode(PlaylistMode.loop); // 默认循环播放
-    player.open(Media(widget.videoPath));      // 自动播放
-    
-    // 监听播放状态
-    player.stream.playing.listen((playing) {
-      if (mounted) {
-        setState(() => _isPlaying = playing);
-      }
-    });
+    // 💡 防死锁：只有文件存在才启动播放引擎
+    _fileExists = File(widget.videoPath).existsSync();
+    if (_fileExists) {
+      player.setPlaylistMode(PlaylistMode.loop);
+      player.open(Media(widget.videoPath));
+      player.stream.playing.listen((playing) {
+        if (mounted) setState(() => _isPlaying = playing);
+      });
+    }
   }
 
   @override
@@ -96,24 +115,28 @@ class _FullScreenVideoItemState extends State<_FullScreenVideoItem> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_fileExists) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.videocam_off, color: Colors.white54, size: 60),
+            SizedBox(height: 16),
+            Text("视频文件已丢失", style: TextStyle(color: Colors.white54, fontSize: 16)),
+          ],
+        ),
+      );
+    }
+    
     return Center(
       child: Stack(
         alignment: Alignment.center,
         children: [
-          // 核心视频渲染组件
-          Video(
-            controller: controller, 
-            controls: NoVideoControls // 禁用默认控制栏，我们自己画中间的播放键
-          ),
-          
-          // 点击画面可以暂停/继续，并有平滑的动画图标
+          Video(controller: controller, controls: NoVideoControls),
           GestureDetector(
             onTap: () {
-              if (_isPlaying) {
-                player.pause();
-              } else {
-                player.play();
-              }
+              if (_isPlaying) player.pause();
+              else player.play();
             },
             child: Container(
               color: Colors.transparent,

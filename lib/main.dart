@@ -5,18 +5,17 @@ import 'package:sqflite/sqflite.dart'; // 💡 补全了核心数据库引用
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:media_kit/media_kit.dart'; // 💡 引入媒体引擎
-
+import 'package:window_manager/window_manager.dart'; 
+import 'core/database_helper.dart';
 import 'pages/home_page.dart';
 
+final ValueNotifier<Color> globalThemeColor = ValueNotifier<Color>(Colors.teal);
 final GlobalKey<NavigatorState> globalNavigatorKey = GlobalKey<NavigatorState>();
 final ValueNotifier<ThemeMode> globalThemeMode = ValueNotifier(ThemeMode.light);
 final ValueNotifier<bool> globalEyeCareMode = ValueNotifier(false);
-bool globalEnableTypingSound = false; 
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // 💡 初始化全能视频播放器底层引擎
   MediaKit.ensureInitialized();
 
   if (Platform.isWindows || Platform.isLinux) {
@@ -24,7 +23,26 @@ void main() async {
     databaseFactory = databaseFactoryFfi;
   }
 
+  // 💡 核心新增：初始化窗口管理器，隐藏原生系统标题栏
+  if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+    await windowManager.ensureInitialized();
+    WindowOptions windowOptions = const WindowOptions(
+      size: Size(1000, 750), // 默认窗口大小
+      minimumSize: Size(800, 600), // 最小窗口大小
+      center: true, // 启动时居中
+      backgroundColor: Colors.transparent,
+      skipTaskbar: false,
+      titleBarStyle: TitleBarStyle.hidden, // 👑 这一句直接干掉系统白色标题栏！
+    );
+    windowManager.waitUntilReadyToShow(windowOptions, () async {
+      await windowManager.show();
+      await windowManager.focus();
+    });
+  }
+
   final prefs = await SharedPreferences.getInstance();
+  final int autoCleanDays = prefs.getInt('auto_clean_days') ?? 30;
+  DatabaseHelper.instance.autoCleanTrash(autoCleanDays);
   final bool useLock = prefs.getBool('use_lock') ?? false;
   final String lockPwd = prefs.getString('lock_pwd') ?? '';
   final String lockQuestion = prefs.getString('lock_question') ?? '';
@@ -32,7 +50,12 @@ void main() async {
   
   globalThemeMode.value = (prefs.getBool('is_dark') ?? false) ? ThemeMode.dark : ThemeMode.light;
   globalEyeCareMode.value = prefs.getBool('is_eye_care') ?? false;
-  globalEnableTypingSound = prefs.getBool('typing_sound') ?? false;
+  
+
+  final int? colorValue = prefs.getInt('themeColor');
+  if (colorValue != null) {
+    globalThemeColor.value = Color(colorValue);
+  }
 
   runApp(MyDiaryApp(useLock: useLock, lockPwd: lockPwd, lockQuestion: lockQuestion, lockAnswer: lockAnswer));
 }
@@ -51,6 +74,9 @@ class MyDiaryApp extends StatefulWidget {
 
 class _MyDiaryAppState extends State<MyDiaryApp> {
   Timer? _idleTimer;
+  bool _isLockedNow = false;
+
+  
 
   @override
   void initState() {
@@ -59,13 +85,21 @@ class _MyDiaryAppState extends State<MyDiaryApp> {
   }
 
   void _resetIdleTimer([_]) {
+    if (_isLockedNow) return; // 💡 如果已经锁了，别再计时了
     _idleTimer?.cancel();
     if (widget.useLock && widget.lockPwd.isNotEmpty) {
       _idleTimer = Timer(const Duration(minutes: 1), () {
-        if (globalNavigatorKey.currentState != null) {
-          globalNavigatorKey.currentState!.pushAndRemoveUntil(
-            MaterialPageRoute(builder: (context) => LockScreen(correctPwd: widget.lockPwd, question: widget.lockQuestion, answer: widget.lockAnswer)),
-            (route) => false,
+        if (globalNavigatorKey.currentState != null && !_isLockedNow) {
+          _isLockedNow = true;
+          globalNavigatorKey.currentState!.push(
+            PageRouteBuilder(
+              pageBuilder: (c, a1, a2) => LockScreen(
+                correctPwd: widget.lockPwd, question: widget.lockQuestion, answer: widget.lockAnswer, 
+                isInitialLaunch: false, // 💡 挂机弹出的标记为 false
+                onUnlock: () => _isLockedNow = false, // 💡 解锁后恢复状态
+              ),
+              transitionsBuilder: (c, a1, a2, child) => FadeTransition(opacity: a1, child: child),
+            )
           );
         }
       });
@@ -78,40 +112,48 @@ class _MyDiaryAppState extends State<MyDiaryApp> {
       onPointerDown: _resetIdleTimer,
       onPointerMove: _resetIdleTimer,
       behavior: HitTestBehavior.translucent,
-      child: ValueListenableBuilder<ThemeMode>(
-        valueListenable: globalThemeMode,
-        builder: (context, themeMode, _) {
-          return ValueListenableBuilder<bool>(
-            valueListenable: globalEyeCareMode,
-            builder: (context, isEyeCare, _) {
-              final lightTheme = isEyeCare 
-                ? ThemeData(
-                    fontFamily: 'Microsoft YaHei',
-                    colorScheme: ColorScheme.fromSeed(seedColor: Colors.brown),
-                    scaffoldBackgroundColor: const Color(0xFFFAF3E0), 
-                    appBarTheme: const AppBarTheme(backgroundColor: Color(0xFFD7CCC8), foregroundColor: Colors.black87),
-                    cardColor: const Color(0xFFFFFDF8),
-                    useMaterial3: true,
-                  )
-                : ThemeData(
-                    fontFamily: 'Microsoft YaHei',
-                    colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
-                    useMaterial3: true,
-                  );
+      // 💡 核心修改：在这里多套一层 ValueListenableBuilder 来监听我们定义的 globalThemeColor
+      child: ValueListenableBuilder<Color>(
+        valueListenable: globalThemeColor,
+        builder: (context, themeColor, _) {
+          return ValueListenableBuilder<ThemeMode>(
+            valueListenable: globalThemeMode,
+            builder: (context, themeMode, _) {
+              return ValueListenableBuilder<bool>(
+                valueListenable: globalEyeCareMode,
+                builder: (context, isEyeCare, _) {
+                  final lightTheme = isEyeCare 
+                    ? ThemeData(
+                        fontFamily: 'Microsoft YaHei',
+                        colorScheme: ColorScheme.fromSeed(seedColor: Colors.brown),
+                        scaffoldBackgroundColor: const Color(0xFFFAF3E0), 
+                        appBarTheme: const AppBarTheme(backgroundColor: Color(0xFFD7CCC8), foregroundColor: Colors.black87),
+                        cardColor: const Color(0xFFFFFDF8),
+                        useMaterial3: true,
+                      )
+                    : ThemeData(
+                        fontFamily: 'Microsoft YaHei',
+                        // 💡 替换：这里把原本写死的 Colors.teal 换成了动态的 themeColor
+                        colorScheme: ColorScheme.fromSeed(seedColor: themeColor),
+                        useMaterial3: true,
+                      );
 
-              return MaterialApp(
-                navigatorKey: globalNavigatorKey,
-                title: 'GrainBuds',
-                debugShowCheckedModeBanner: false,
-                themeMode: themeMode,
-                theme: lightTheme,
-                darkTheme: ThemeData.dark(useMaterial3: true).copyWith(
-                  colorScheme: const ColorScheme.dark(primary: Colors.tealAccent),
-                  appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF1E1E1E)),
-                ),
-                home: widget.useLock && widget.lockPwd.isNotEmpty
-                    ? LockScreen(correctPwd: widget.lockPwd, question: widget.lockQuestion, answer: widget.lockAnswer)
-                    : const HomePage(),
+                  return MaterialApp(
+                    navigatorKey: globalNavigatorKey,
+                    title: 'GrainBuds',
+                    debugShowCheckedModeBanner: false,
+                    themeMode: themeMode,
+                    theme: lightTheme,
+                    darkTheme: ThemeData.dark(useMaterial3: true).copyWith(
+                      // 💡 替换：暗黑模式的主色调也同步跟随
+                      colorScheme: ColorScheme.dark(primary: themeColor),
+                      appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF1E1E1E)),
+                    ),
+                    home: widget.useLock && widget.lockPwd.isNotEmpty
+                        ? LockScreen(correctPwd: widget.lockPwd, question: widget.lockQuestion, answer: widget.lockAnswer, isInitialLaunch: true) // 💡 首次启动标记为 true
+                        : const HomePage(),
+                  );
+                }
               );
             }
           );
@@ -125,8 +167,18 @@ class LockScreen extends StatefulWidget {
   final String correctPwd;
   final String question; 
   final String answer;   
+  final bool isInitialLaunch; // 💡 接收标记，判断是不是刚打开软件
+  final VoidCallback? onUnlock; // 💡 接收解锁成功的回调
 
-  const LockScreen({super.key, required this.correctPwd, required this.question, required this.answer});
+  const LockScreen({
+    super.key, 
+    required this.correctPwd, 
+    required this.question, 
+    required this.answer, 
+    this.isInitialLaunch = true, 
+    this.onUnlock
+  });
+
   @override
   State<LockScreen> createState() => _LockScreenState();
 }
@@ -137,7 +189,15 @@ class _LockScreenState extends State<LockScreen> {
 
   void _checkPwd() {
     if (_pwdController.text == widget.correctPwd) {
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const HomePage()));
+      if (widget.onUnlock != null) widget.onUnlock!(); // 💡 呼叫回调，告诉外界我已经解锁了
+      
+      if (widget.isInitialLaunch) {
+        // 如果是刚打开软件，解锁后推入主页
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const HomePage()));
+      } else {
+        // 💡 如果是挂机弹出的锁屏，直接 Pop 关掉自己就行，千万不要再推入一个新的主页了！
+        Navigator.pop(context); 
+      }
     } else {
       setState(() { _hasError = true; _pwdController.clear(); });
     }
@@ -178,7 +238,16 @@ class _LockScreenState extends State<LockScreen> {
                 
                 if (mounted) {
                   Navigator.pop(c); 
-                  Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const HomePage()));
+                  
+                  if (widget.onUnlock != null) widget.onUnlock!(); // 💡 找回密码也属于解锁成功
+                  
+                  // 💡 同样修复找回密码时的路由跳转套娃问题
+                  if (widget.isInitialLaunch) {
+                    Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const HomePage()));
+                  } else {
+                    Navigator.pop(context);
+                  }
+                  
                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('🔓 密码已被强制清除，请前往设置重新绑定！'), backgroundColor: Colors.teal));
                 }
               } else {

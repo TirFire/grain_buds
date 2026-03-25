@@ -145,7 +145,8 @@ class DatabaseHelper {
         String unique = "${file.path}_${DateTime.now().microsecondsSinceEpoch}";
         final hash = md5.convert(utf8.encode(unique)).toString().substring(0, 8);
         String name = "${DateTime.now().millisecondsSinceEpoch}_$hash${p.extension(file.path)}";
-        file.copySync(p.join(assetsDir.path, name));
+        // 💡 修复：将 copySync 改为 await copy！释放 UI 线程！
+        await file.copy(p.join(assetsDir.path, name)); 
         relativePaths.add("assets/$name");
       }
     }
@@ -178,24 +179,43 @@ class DatabaseHelper {
       int endIdx = text.indexOf('\n---\n', 3);
       if (endIdx != -1) {
         String yamlStr = text.substring(3, endIdx);
-        result['content'] = text.substring(endIdx + 5).trim();
-        // 解析 YAML 头部中的媒体路径
+        // 修复：不能用 .trim()，否则第一行的首行缩进空格会消失
+        String rawBody = text.substring(endIdx + 5);
+        // 只去除紧贴着 yaml 头部下方的第一个换行符
+        if (rawBody.startsWith('\n')) {
+          rawBody = rawBody.substring(1);
+        } else if (rawBody.startsWith('\r\n')) {
+          rawBody = rawBody.substring(2);
+        }
+        // 使用 trimRight() 只去掉尾部多余的空行，保留头部的缩进空格
+        result['content'] = rawBody.trimRight();
+        // 解析 YAML 头部中的媒体路径 (💡 读取时全部执行 p.normalize，抹平系统差异)
         for (String line in yamlStr.split('\n')) {
           if (line.startsWith('images:')) {
             try { 
               List<String> relImgs = List<String>.from(jsonDecode(line.substring(7).trim())); 
-              result['imagePath'] = jsonEncode(relImgs.map((r) => p.join(root, yearMonth, r)).toList()); 
+              result['imagePath'] = jsonEncode(relImgs.map((r) => p.normalize(p.join(root, yearMonth, r))).toList()); 
             } catch (_) {}
-          } else if (line.startsWith('video:')) {
+          } else if (line.startsWith('videos:')) { // 💡 新增：读取无限视频数组
+            try { 
+              List<String> relVids = List<String>.from(jsonDecode(line.substring(7).trim())); 
+              result['videoPaths'] = jsonEncode(relVids.map((r) => p.normalize(p.join(root, yearMonth, r))).toList()); 
+            } catch (_) {}
+          } else if (line.startsWith('audios:')) { // 💡 新增：读取无限音频数组
+            try { 
+              List<String> relAuds = List<String>.from(jsonDecode(line.substring(7).trim())); 
+              result['audioPaths'] = jsonEncode(relAuds.map((r) => p.normalize(p.join(root, yearMonth, r))).toList()); 
+            } catch (_) {}
+          } else if (line.startsWith('video:')) { // 兼容以前存的老视频
             String vidRel = line.substring(6).trim(); 
-            if (vidRel.isNotEmpty) result['videoPath'] = p.join(root, yearMonth, vidRel);
-          } else if (line.startsWith('audio:')) {
+            if (vidRel.isNotEmpty) result['videoPath'] = p.normalize(p.join(root, yearMonth, vidRel));
+          } else if (line.startsWith('audio:')) { // 兼容以前存的老音频
             String audRel = line.substring(6).trim(); 
-            if (audRel.isNotEmpty) result['audioPath'] = p.join(root, yearMonth, audRel);
+            if (audRel.isNotEmpty) result['audioPath'] = p.normalize(p.join(root, yearMonth, audRel));
           } else if (line.startsWith('attachments:')) {
             try { 
               List<String> relAtts = List<String>.from(jsonDecode(line.substring(12).trim())); 
-              result['attachments'] = jsonEncode(relAtts.map((r) => p.join(root, yearMonth, r)).toList()); 
+              result['attachments'] = jsonEncode(relAtts.map((r) => p.normalize(p.join(root, yearMonth, r))).toList()); 
             } catch (_) {}
           }
         }
@@ -222,38 +242,31 @@ class DatabaseHelper {
     List<String> relImages = await _processMedia(imgPaths, yearMonth);
     List<String> relAtts = await _processMedia(attPaths, yearMonth);
     
-    String relVideo = "";
-    if (diary['videoPath'] != null) {
-      var v = await _processMedia([diary['videoPath'] as String], yearMonth);
-      if (v.isNotEmpty) relVideo = v.first;
-    }
-
-    String relAudio = "";
-    if (diary['audioPath'] != null) {
-      var a = await _processMedia([diary['audioPath'] as String], yearMonth);
-      if (a.isNotEmpty) relAudio = a.first;
-    }
+    // 💡 升级 2：按月存入本地的机制 —— _processMedia 会把新文件完美拷贝进 yearMonth/assets 文件夹
+    List<String> vidPaths = [];
+    List<String> audPaths = [];
+    try { vidPaths = List<String>.from(jsonDecode((diary['videoPaths'] as String?) ?? '[]')); } catch(_) {}
+    try { audPaths = List<String>.from(jsonDecode((diary['audioPaths'] as String?) ?? '[]')); } catch(_) {}
+    
+    List<String> relVids = await _processMedia(vidPaths, yearMonth);
+    List<String> relAuds = await _processMedia(audPaths, yearMonth);
 
     // 生成文件名
     String timeStamp = DateTime.now().millisecondsSinceEpoch.toString();
-    String safeTitle = ((diary['title'] as String?) ?? "无标题")
-        .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-    
-    String mdName = "${date.toString().substring(0, 10)}_$timeStamp" + 
-                    (safeTitle.isNotEmpty ? "_$safeTitle" : "") + ".md";
-    
+    String safeTitle = ((diary['title'] as String?) ?? "无标题").replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+    String mdName = "${date.toString().substring(0, 10)}_$timeStamp" + (safeTitle.isNotEmpty ? "_$safeTitle" : "") + ".md";
     String relPath = _normalizePath(p.join(yearMonth, mdName));
 
-    // 💡 修复：在这里补全物理文件的写入逻辑！
-    // 只有把内容写进硬盘，下次读取时内容才不会消失
-    String mdContent = "---\ntitle: ${diary['title']}\ndate: ${diary['date']}\nweather: ${diary['weather']}\nmood: ${diary['mood']}\ntags: ${diary['tags']}\nimages: ${jsonEncode(relImages)}\nvideo: $relVideo\naudio: $relAudio\nattachments: ${jsonEncode(relAtts)}\n---\n${diary['content']}";
+    // 💡 写入 Markdown 文件，属性名变为复数的 videos 和 audios
+    String mdContent = "---\ntitle: ${diary['title']}\ndate: ${diary['date']}\nweather: ${diary['weather']}\nmood: ${diary['mood']}\ntags: ${diary['tags']}\nimages: ${jsonEncode(relImages)}\nvideos: ${jsonEncode(relVids)}\naudios: ${jsonEncode(relAuds)}\nattachments: ${jsonEncode(relAtts)}\n---\n${diary['content']}";
     await File(p.join(root, relPath)).writeAsString(mdContent);
 
+    // 写入数据库
     // 写入数据库
     return await db.insert('diaries', {
       'title': diary['title'], 'date': diary['date'], 'weather': diary['weather'],
       'mood': diary['mood'], 'tags': diary['tags'], 'md_path': relPath, 'is_trash': 0,
-      'audio_path': relAudio, 'attachments': jsonEncode(relAtts),
+      'audio_path': jsonEncode(relAuds), 'attachments': jsonEncode(relAtts), 
       'is_locked': diary['is_locked'] ?? 0, 'is_archived': diary['is_archived'] ?? 0, 'pwd_hash': diary['pwd_hash'],
       'update_time': DateTime.now().toString(),
       'location': diary['location'],
@@ -271,33 +284,54 @@ class DatabaseHelper {
     final String oldRelPath = old.first['md_path'] as String;
     final String yearMonth = p.dirname(oldRelPath);
 
-    List<String> imgPaths = [];
-    List<String> attPaths = [];
-    try { imgPaths = List<String>.from(jsonDecode((diary['imagePath'] as String?) ?? '[]')); } catch(_) {}
-    try { attPaths = List<String>.from(jsonDecode((diary['attachments'] as String?) ?? '[]')); } catch(_) {}
+    // ================= 💡 核心修复：媒体垃圾回收机制 (支持无限音视频 + 路径标准化防误杀) =================
+    final oldDiary = await _readMdFile(old.first);
     
-    List<String> relImages = await _processMedia(imgPaths, yearMonth);
-    List<String> relAtts = await _processMedia(attPaths, yearMonth);
-    
-    String relVideo = "";
-    if (diary['videoPath'] != null) {
-      var v = await _processMedia([diary['videoPath'] as String], yearMonth);
-      if (v.isNotEmpty) relVideo = v.first;
+    // 1. 获取旧数据 (极其强大的兼容性：同时囊括旧版单文件和新版多文件)
+    List<String> oldImgs = []; List<String> oldAtts = []; List<String> oldVids = []; List<String> oldAuds = [];
+    try { oldImgs = List<String>.from(jsonDecode((oldDiary['imagePath'] as String?) ?? '[]')); } catch(_) {}
+    try { oldAtts = List<String>.from(jsonDecode((oldDiary['attachments'] as String?) ?? '[]')); } catch(_) {}
+    try { oldVids = List<String>.from(jsonDecode((oldDiary['videoPaths'] as String?) ?? '[]')); } catch(_) {
+      if (oldDiary['videoPath'] != null) oldVids.add(oldDiary['videoPath'] as String);
+    }
+    try { oldAuds = List<String>.from(jsonDecode((oldDiary['audioPaths'] as String?) ?? '[]')); } catch(_) {
+      if (oldDiary['audioPath'] != null) oldAuds.add(oldDiary['audioPath'] as String);
     }
 
-    String relAudio = "";
-    if (diary['audioPath'] != null) {
-      var a = await _processMedia([diary['audioPath'] as String], yearMonth);
-      if (a.isNotEmpty) relAudio = a.first;
-    }
+    // 2. 获取新数据
+    List<String> newImgs = []; List<String> newAtts = []; List<String> newVids = []; List<String> newAuds = [];
+    try { newImgs = List<String>.from(jsonDecode((diary['imagePath'] as String?) ?? '[]')); } catch(_) {}
+    try { newAtts = List<String>.from(jsonDecode((diary['attachments'] as String?) ?? '[]')); } catch(_) {}
+    try { newVids = List<String>.from(jsonDecode((diary['videoPaths'] as String?) ?? '[]')); } catch(_) {}
+    try { newAuds = List<String>.from(jsonDecode((diary['audioPaths'] as String?) ?? '[]')); } catch(_) {}
 
-    // 更新 MD 文件
-    String mdContent = "---\ntitle: ${diary['title']}\ndate: ${diary['date']}\nweather: ${diary['weather']}\nmood: ${diary['mood']}\ntags: ${diary['tags']}\nimages: ${jsonEncode(relImages)}\nvideo: $relVideo\naudio: $relAudio\nattachments: ${jsonEncode(relAtts)}\n---\n${diary['content']}";
+    // 3. 物理粉碎被抛弃的孤儿文件 (通过 p.normalize() 统一斜杠，杜绝 Windows 误杀)
+    List<String> safeNewImgs = newImgs.map((e) => p.normalize(e)).toList();
+    for (String oldImg in oldImgs) { if (!safeNewImgs.contains(p.normalize(oldImg))) { File f = File(oldImg); if (f.existsSync()) f.deleteSync(); } }
+    
+    List<String> safeNewAtts = newAtts.map((e) => p.normalize(e)).toList();
+    for (String oldAtt in oldAtts) { if (!safeNewAtts.contains(p.normalize(oldAtt))) { File f = File(oldAtt); if (f.existsSync()) f.deleteSync(); } }
+
+    List<String> safeNewVids = newVids.map((e) => p.normalize(e)).toList();
+    for (String oldVid in oldVids) { if (!safeNewVids.contains(p.normalize(oldVid))) { File f = File(oldVid); if (f.existsSync()) f.deleteSync(); } }
+
+    List<String> safeNewAuds = newAuds.map((e) => p.normalize(e)).toList();
+    for (String oldAud in oldAuds) { if (!safeNewAuds.contains(p.normalize(oldAud))) { File f = File(oldAud); if (f.existsSync()) f.deleteSync(); } }
+    // =============================================================
+
+    // 4. 将最新插入的文件，按月存入本地的 yearMonth/assets 专属文件夹中
+    List<String> relImages = await _processMedia(newImgs, yearMonth);
+    List<String> relAtts = await _processMedia(newAtts, yearMonth);
+    List<String> relVids = await _processMedia(newVids, yearMonth);
+    List<String> relAuds = await _processMedia(newAuds, yearMonth);
+
+    // 5. 更新本地 MD 文件
+    String mdContent = "---\ntitle: ${diary['title']}\ndate: ${diary['date']}\nweather: ${diary['weather']}\nmood: ${diary['mood']}\ntags: ${diary['tags']}\nimages: ${jsonEncode(relImages)}\nvideos: ${jsonEncode(relVids)}\naudios: ${jsonEncode(relAuds)}\nattachments: ${jsonEncode(relAtts)}\n---\n${diary['content']}";
     await File(p.join(root, oldRelPath)).writeAsString(mdContent);
 
     return await db.update('diaries', {
       'title': diary['title'], 'weather': diary['weather'], 'mood': diary['mood'], 'tags': diary['tags'],
-      'audio_path': relAudio, 'attachments': jsonEncode(relAtts),
+      'audio_path': jsonEncode(relAuds), 'attachments': jsonEncode(relAtts), 
       'is_locked': diary['is_locked'] ?? 0, 'is_archived': diary['is_archived'] ?? 0, 'pwd_hash': diary['pwd_hash'],
       'update_time': DateTime.now().toString(),
       'location': diary['location'],
@@ -347,12 +381,24 @@ class DatabaseHelper {
            if (mdFile.existsSync()) {
                final fullDiary = await _readMdFile(meta);
                List<String> imgs = []; List<String> atts = [];
+               List<String> vids = []; List<String> auds = [];
+               
+               // 💡 修复：全面解析四大媒体数组，囊括新旧格式
                try { imgs = List<String>.from(jsonDecode((fullDiary['imagePath'] as String?) ?? '[]')); } catch(_) {}
                try { atts = List<String>.from(jsonDecode((fullDiary['attachments'] as String?) ?? '[]')); } catch(_) {}
+               try { vids = List<String>.from(jsonDecode((fullDiary['videoPaths'] as String?) ?? '[]')); } catch(_) {
+                 if (fullDiary['videoPath'] != null) vids.add(fullDiary['videoPath'] as String);
+               }
+               try { auds = List<String>.from(jsonDecode((fullDiary['audioPaths'] as String?) ?? '[]')); } catch(_) {
+                 if (fullDiary['audioPath'] != null) auds.add(fullDiary['audioPath'] as String);
+               }
+               
+               // 物理粉碎所有数组里的源文件
                for (String img in imgs) { File f = File(img); if (f.existsSync()) f.deleteSync(); }
                for (String att in atts) { File f = File(att); if (f.existsSync()) f.deleteSync(); }
-               if (fullDiary['videoPath'] != null) { File f = File(fullDiary['videoPath'] as String); if (f.existsSync()) f.deleteSync(); }
-               if (fullDiary['audioPath'] != null) { File f = File(fullDiary['audioPath'] as String); if (f.existsSync()) f.deleteSync(); }
+               for (String vid in vids) { File f = File(vid); if (f.existsSync()) f.deleteSync(); }
+               for (String aud in auds) { File f = File(aud); if (f.existsSync()) f.deleteSync(); }
+               
                mdFile.deleteSync();
            }
        }
@@ -392,6 +438,24 @@ class DatabaseHelper {
     return fullList;
   }
 
+  // 💡 获取所有星标日记
+  Future<List<Map<String, dynamic>>> getStarredDiaries() async {
+    final db = await instance.database;
+    final metaList = await db.query('diaries', where: 'is_starred = 1 AND is_trash = 0', orderBy: 'date DESC');
+    List<Map<String, dynamic>> fullList = [];
+    for(var m in metaList) fullList.add(await _readMdFile(m));
+    return fullList;
+  }
+
+  // 💡 获取所有归档日记
+  Future<List<Map<String, dynamic>>> getArchivedDiaries() async {
+    final db = await instance.database;
+    final metaList = await db.query('diaries', where: 'is_archived = 1 AND is_trash = 0', orderBy: 'date DESC');
+    List<Map<String, dynamic>> fullList = [];
+    for(var m in metaList) fullList.add(await _readMdFile(m));
+    return fullList;
+  }
+
   // ================= 备份逻辑 =================
 
   Future<String?> createFullBackup(String savePath) async {
@@ -403,5 +467,23 @@ class DatabaseHelper {
       encoder.close();
       return savePath;
     } catch (e) { return null; }
+  }
+  // ================= 自动清理回收站 =================
+  Future<void> autoCleanTrash(int days) async {
+    if (days <= 0) return; // 0 表示从不自动清理
+    final cutoffDate = DateTime.now().subtract(Duration(days: days)); // 计算出界限日期
+    
+    // 获取回收站里所有的日记
+    final trashedList = await getTrashedDiaries();
+    for (var diary in trashedList) {
+      if (diary['delete_time'] != null) {
+        try {
+          DateTime deleteTime = DateTime.parse(diary['delete_time']);
+          if (deleteTime.isBefore(cutoffDate)) {
+            await permanentlyDeleteDiary(diary['id']);
+          }
+        } catch (_) {}
+      }
+    }
   }
 }
