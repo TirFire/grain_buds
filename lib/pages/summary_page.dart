@@ -1,11 +1,12 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:screenshot/screenshot.dart';
-// 💡 同样的，引入路径处理和打开文件的库
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as p;
 import 'package:open_filex/open_filex.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart'; // 💡 新增
+import 'package:path/path.dart' as p; // 💡 新增
+import 'package:share_plus/share_plus.dart'; // 💡 新增
 
 import '../core/database_helper.dart';
 import '../core/constants.dart';
@@ -90,38 +91,69 @@ class _SummaryPageState extends State<SummaryPage> {
 
     try {
       await Future.delayed(const Duration(milliseconds: 300));
-      
+
       final imageBytes = await _screenshotController.capture(pixelRatio: 1.5);
-      
+
       if (imageBytes != null) {
-        final directory = await getApplicationDocumentsDirectory();
-        final exportDir = Directory(p.join(directory.path, 'MyDiary_Data', 'Exports'));
-        if (!await exportDir.exists()) {
-          await exportDir.create(recursive: true);
+        String? savePath;
+        final String fileName =
+            '年度海报_${DateTime.now().millisecondsSinceEpoch}.png';
+
+        // 💡 核心修复：手机端直接存沙盒准备分享，Windows端呼出“另存为”对话框
+        if (Platform.isAndroid || Platform.isIOS) {
+          final directory = await getApplicationDocumentsDirectory();
+          final exportDir =
+              Directory(p.join(directory.path, 'MyDiary_Data', 'Exports'));
+          if (!await exportDir.exists()) {
+            await exportDir.create(recursive: true);
+          }
+          savePath = p.join(exportDir.path, fileName);
+        } else {
+          // 💻 Windows 端：调用系统原生的“另存为”弹窗让用户选位置
+          final FileSaveLocation? result =
+              await getSaveLocation(suggestedName: fileName);
+          if (result == null) {
+            setState(() => _isCapturing = false);
+            return;
+          }
+          savePath = result.path;
         }
 
-        final String fileName = '年度海报_${DateTime.now().millisecondsSinceEpoch}.png';
-        final String savePath = p.join(exportDir.path, fileName);
-        
+        // 执行文件写入
         await File(savePath).writeAsBytes(imageBytes);
-        
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: const Text('🎉 年度海报已成功保存！'),
+            content: const Text('🎉 年度海报已成功生成！'),
             backgroundColor: Colors.amber.shade700,
             duration: const Duration(seconds: 6),
             action: SnackBarAction(
-              label: '立即打开查看',
+              label: (Platform.isAndroid || Platform.isIOS) ? '分享/保存' : '立即查看',
               textColor: Colors.white,
-              onPressed: () => OpenFilex.open(savePath),
+              onPressed: () async {
+                if (Platform.isAndroid || Platform.isIOS) {
+                  // 📱 手机端：呼出系统原生分享面板，等待结束后删除临时图片
+                  await Share.shareXFiles([XFile(savePath!)]);
+                  try {
+                    File(savePath).deleteSync();
+                  } catch (_) {}
+                } else {
+                  // 💻 Windows端：直接打开文件所在位置（电脑端不删，因为是另存为的）
+                  OpenFilex.open(savePath!);
+                }
+              },
             ),
           ));
         }
       } else {
-         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('截取失败，请稍微上下滑动页面再试')));
+        if (mounted)
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('截取失败，请稍微上下滑动页面再试')));
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('生成海报失败: $e'), backgroundColor: Colors.red));
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('生成海报失败: $e'), backgroundColor: Colors.red));
     } finally {
       if (mounted) setState(() => _isCapturing = false);
     }
@@ -158,10 +190,17 @@ class _SummaryPageState extends State<SummaryPage> {
             else
               ElevatedButton.icon(
                 onPressed: _captureAndShare,
-                icon: const Icon(Icons.download), // 💡 图标改为下载
-                label: const Text("保存海报到电脑",
-                    style:
-                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                // 💡 动态图标：手机端显示分享图标，Windows显示下载图标
+                icon: Icon((Platform.isAndroid || Platform.isIOS)
+                    ? Icons.share
+                    : Icons.download),
+                // 💡 动态文案
+                label: Text(
+                    (Platform.isAndroid || Platform.isIOS)
+                        ? "生成并分享总结海报"
+                        : "保存海报到电脑",
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.bold)),
                 style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.amber,
                     foregroundColor: Colors.black87,

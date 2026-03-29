@@ -8,7 +8,7 @@ import 'package:archive/archive_io.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
-import 'collection_page.dart'; 
+import 'collection_page.dart';
 import '../core/database_helper.dart';
 import '../widgets/diary_card.dart';
 import 'edit_page.dart';
@@ -16,6 +16,12 @@ import 'settings_page.dart';
 import 'stats_page.dart';
 import 'tags_page.dart';
 import '../widgets/custom_title_bar.dart';
+import '../core/constants.dart';
+import 'package:flutter/services.dart' show rootBundle;
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
+import 'package:share_plus/share_plus.dart';
+import 'anniversaries_page.dart'; // 💡 新增这一行
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -34,7 +40,20 @@ class _HomePageState extends State<HomePage> {
   bool _isDescending = true;
   final ValueNotifier<int> _refreshTrigger = ValueNotifier(0);
 
+  // 💡 新增：用于接管左右滑动的页面控制器
+  late PageController _pageController;
 
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController(initialPage: _currentIndex);
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
 
   Future<void> _performSearch(String keyword) async {
     if (keyword.isEmpty) {
@@ -53,17 +72,31 @@ class _HomePageState extends State<HomePage> {
     if (_selectedIds.isEmpty) return;
 
     String timeStamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-    FileSaveLocation? result;
+    String fileName = '';
 
-    if (format == 'pdf') {
-      result = await getSaveLocation(suggestedName: '批量合并日记_$timeStamp.pdf');
-    } else if (format == 'pdf_zip') {
-      result = await getSaveLocation(suggestedName: '批量独立PDF_$timeStamp.zip');
+    if (format == 'pdf')
+      fileName = '批量合并日记_$timeStamp.pdf';
+    else if (format == 'pdf_zip')
+      fileName = '批量独立PDF_$timeStamp.zip';
+    else
+      fileName = '批量导出日记_$timeStamp.zip';
+
+    String? savePath;
+
+    if (Platform.isAndroid || Platform.isIOS) {
+      // 📱 手机端：静默保存到本地
+      final directory = await getApplicationDocumentsDirectory();
+      final exportDir =
+          Directory(p.join(directory.path, 'MyDiary_Data', 'Exports'));
+      if (!await exportDir.exists()) await exportDir.create(recursive: true);
+      savePath = p.join(exportDir.path, fileName);
     } else {
-      result = await getSaveLocation(suggestedName: '批量导出日记_$timeStamp.zip');
+      // 💻 电脑端：调用弹窗
+      final FileSaveLocation? result =
+          await getSaveLocation(suggestedName: fileName);
+      if (result == null) return;
+      savePath = result.path;
     }
-
-    if (result == null) return;
 
     bool isDialogShowing = true;
     showDialog(
@@ -94,91 +127,201 @@ class _HomePageState extends State<HomePage> {
           allDiaries.where((d) => _selectedIds.contains(d['id'])).toList();
 
       if (format == 'pdf') {
-        final font = await PdfGoogleFonts.notoSansSCRegular();
-        final pdf = pw.Document(theme: pw.ThemeData.withFont(base: font));
+        // 💡 替换为本地读取
+        final regularData =
+            await rootBundle.load('assets/fonts/NotoSansSC-Regular.ttf');
+        final font = pw.Font.ttf(regularData);
+        final boldData =
+            await rootBundle.load('assets/fonts/NotoSansSC-Bold.ttf');
+        final fontBold = pw.Font.ttf(boldData);
+
+        pw.Font emojiFont;
+        try {
+          emojiFont = await PdfGoogleFonts.notoColorEmoji()
+              .timeout(const Duration(seconds: 2));
+        } catch (_) {
+          emojiFont = font;
+        }
+
+        final pdf = pw.Document(
+            theme: pw.ThemeData.withFont(
+                base: font, bold: fontBold, fontFallback: [emojiFont]));
+
+        // ...
 
         for (var d in selectedDiaries) {
           String title = d['title'] ?? '无标题';
           String date = d['date'] ?? '';
+          String formattedDate =
+              date.length >= 16 ? date.substring(0, 16) : date;
           String content =
               d['is_locked'] == 1 ? "【此日记已加密，无法批量导出明文】" : (d['content'] ?? '');
+
+          String weather =
+              AppConstants.getWeatherEmoji(d['weather'] as String?);
+          String mood = AppConstants.getMoodEmoji(d['mood'] as String?);
+
+          List<String> images = [];
+          try {
+            if (d['image_path'] != null)
+              images = List<String>.from(jsonDecode(d['image_path']));
+            else if (d['imagePath'] != null)
+              images = List<String>.from(jsonDecode(d['imagePath']));
+          } catch (_) {}
+
           pdf.addPage(pw.MultiPage(
               build: (pw.Context context) => [
                     pw.Header(
                         level: 0,
                         child: pw.Text(title,
                             style: pw.TextStyle(
-                                fontSize: 24, fontWeight: pw.FontWeight.bold))),
-                    pw.Text("记录时间: $date",
-                        style: const pw.TextStyle(color: PdfColors.grey)),
+                                font: fontBold,
+                                fontSize: 24,
+                                fontFallback: [emojiFont]))), // 💡 标题注入
+
+                    pw.Text("记录时间: $formattedDate    天气: $weather    心情: $mood",
+                        style: pw.TextStyle(
+                            color: PdfColors.grey,
+                            fontFallback: [emojiFont])), // 💡 表头注入
                     pw.SizedBox(height: 15),
-                    pw.Text(content,
-                        style:
-                            const pw.TextStyle(fontSize: 14, lineSpacing: 5)),
+
+                    // 💡 核心：调用新的 Markdown 渲染器，传入 emojiFont
+                    ..._renderMarkdown(content, font, fontBold, emojiFont),
+
+                    if (images.isNotEmpty) ...[
+                      pw.SizedBox(height: 20),
+                      ...List.generate((images.length / 2).ceil(), (rowIndex) {
+                        int start = rowIndex * 2;
+                        int end = start + 2 > images.length ? images.length : start + 2;
+                        var rowImages = images.sublist(start, end);
+                        return pw.Padding(
+                          padding: const pw.EdgeInsets.only(bottom: 10),
+                          child: pw.Row(
+                            crossAxisAlignment: pw.CrossAxisAlignment.start,
+                            children: rowImages.map((path) {
+                              try {
+                                final file = File(path);
+                                if (file.existsSync()) {
+                                  return pw.Expanded(
+                                    child: pw.Padding(
+                                      padding: const pw.EdgeInsets.only(right: 10),
+                                      child: pw.Image(pw.MemoryImage(file.readAsBytesSync()), height: 200, fit: pw.BoxFit.contain)
+                                    )
+                                  );
+                                }
+                              } catch (_) {}
+                              return pw.Expanded(child: pw.SizedBox()); 
+                            }).toList(),
+                          )
+                        );
+                      })
+                    ],
                     pw.SizedBox(height: 30),
                     pw.Divider()
                   ]));
         }
-        final file = File(result.path);
+        final file = File(savePath);
         await file.writeAsBytes(await pdf.save());
       } else if (format == 'pdf_zip') {
         final archive = Archive();
-        final font = await PdfGoogleFonts.notoSansSCRegular();
+
+        // 💡 修复：将这里也替换为本地离线字体读取！
+        final regularData =
+            await rootBundle.load('assets/fonts/NotoSansSC-Regular.ttf');
+        final font = pw.Font.ttf(regularData);
+        final boldData =
+            await rootBundle.load('assets/fonts/NotoSansSC-Bold.ttf');
+        final fontBold = pw.Font.ttf(boldData);
+
+        pw.Font emojiFont;
+        try {
+          emojiFont = await PdfGoogleFonts.notoColorEmoji()
+              .timeout(const Duration(seconds: 2));
+        } catch (_) {
+          emojiFont = font;
+        }
 
         for (var d in selectedDiaries) {
           String title = d['title'] ?? '无标题';
           String safeTitle = title.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-          String dateStr = d['date'] ?? '';
+          String date = d['date'] ?? '';
+          String formattedDate =
+              date.length >= 16 ? date.substring(0, 16) : date;
           String content =
               d['is_locked'] == 1 ? "【此日记已加密，无法导出明文】" : (d['content'] ?? '');
-          final singlePdf =
-              pw.Document(theme: pw.ThemeData.withFont(base: font));
+
+          String weather =
+              AppConstants.getWeatherEmoji(d['weather'] as String?);
+          String mood = AppConstants.getMoodEmoji(d['mood'] as String?);
+
+          List<String> images = [];
+          try {
+            if (d['image_path'] != null)
+              images = List<String>.from(jsonDecode(d['image_path']));
+            else if (d['imagePath'] != null)
+              images = List<String>.from(jsonDecode(d['imagePath']));
+          } catch (_) {}
+
+          // 💡 注册粗体和表情备用字体
+          final singlePdf = pw.Document(
+              theme: pw.ThemeData.withFont(
+                  base: font, bold: fontBold, fontFallback: [emojiFont]));
           singlePdf.addPage(pw.MultiPage(
               build: (pw.Context context) => [
                     pw.Header(
                         level: 0,
                         child: pw.Text(title,
                             style: pw.TextStyle(
-                                fontSize: 24, fontWeight: pw.FontWeight.bold))),
-                    pw.Text("记录时间: $dateStr",
-                        style: const pw.TextStyle(color: PdfColors.grey)),
+                                font: fontBold,
+                                fontSize: 24,
+                                fontFallback: [emojiFont]))), // 💡 标题注入
+
+                    pw.Text("记录时间: $formattedDate    天气: $weather    心情: $mood",
+                        style: pw.TextStyle(
+                            color: PdfColors.grey,
+                            fontFallback: [emojiFont])), // 💡 表头注入
                     pw.SizedBox(height: 15),
-                    pw.Text(content,
-                        style: const pw.TextStyle(fontSize: 14, lineSpacing: 5))
+
+                    // 💡 核心：调用新的 Markdown 渲染器，传入 emojiFont
+                    ..._renderMarkdown(content, font, fontBold, emojiFont),
+
+                    if (images.isNotEmpty) ...[
+                      pw.SizedBox(height: 20),
+                      ...List.generate((images.length / 2).ceil(), (rowIndex) {
+                        int start = rowIndex * 2;
+                        int end = start + 2 > images.length ? images.length : start + 2;
+                        var rowImages = images.sublist(start, end);
+                        return pw.Padding(
+                          padding: const pw.EdgeInsets.only(bottom: 10),
+                          child: pw.Row(
+                            crossAxisAlignment: pw.CrossAxisAlignment.start,
+                            children: rowImages.map((path) {
+                              try {
+                                final file = File(path);
+                                if (file.existsSync()) {
+                                  return pw.Expanded(
+                                    child: pw.Padding(
+                                      padding: const pw.EdgeInsets.only(right: 10),
+                                      child: pw.Image(pw.MemoryImage(file.readAsBytesSync()), height: 200, fit: pw.BoxFit.contain)
+                                    )
+                                  );
+                                }
+                              } catch (_) {}
+                              return pw.Expanded(child: pw.SizedBox()); 
+                            }).toList(),
+                          )
+                        );
+                      })
+                    ],
                   ]));
           List<int> pdfBytes = await singlePdf.save();
           archive.addFile(ArchiveFile(
-              '${dateStr.length >= 10 ? dateStr.substring(0, 10) : '未知日期'}_$safeTitle.pdf',
+              '${formattedDate.replaceAll(':', '')}_$safeTitle.pdf',
               pdfBytes.length,
               pdfBytes));
         }
         final zipData = ZipEncoder().encode(archive);
-        await File(result.path).writeAsBytes(zipData);
-      } else {
-        final archive = Archive();
-        for (var d in selectedDiaries) {
-          String title = d['title'] ?? '无标题';
-          String safeTitle = title.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-          String dateStr = d['date'] ?? '';
-          String content =
-              d['is_locked'] == 1 ? "【此日记已加密，无法批量导出明文】" : (d['content'] ?? '');
-          String outputContent = "";
-          if (format == 'md') {
-            outputContent = "# $title\n\n**记录时间:** $dateStr\n\n---\n\n$content";
-          } else if (format == 'txt') {
-            outputContent = "标题: $title\n时间: $dateStr\n\n$content";
-          } else if (format == 'doc') {
-            outputContent =
-                "<html xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:w=\"urn:schemas-microsoft-com:office:word\" xmlns=\"http://www.w3.org/TR/REC-html40\"><head><meta charset=\"utf-8\"><title>$title</title></head><body style=\"font-family: 'Microsoft YaHei', sans-serif;\"><h1 style=\"text-align: center;\">$title</h1><p style=\"color: gray; text-align: center;\">记录时间: $dateStr</p><hr><div style=\"white-space: pre-wrap; line-height: 1.6; font-size: 12pt;\">$content</div></body></html>";
-          }
-          List<int> bytes = utf8.encode(outputContent);
-          archive.addFile(ArchiveFile(
-              '${dateStr.length >= 10 ? dateStr.substring(0, 10) : '未知日期'}_$safeTitle.$format',
-              bytes.length,
-              bytes));
-        }
-        final zipData = ZipEncoder().encode(archive);
-        await File(result.path).writeAsBytes(zipData);
+        await File(savePath).writeAsBytes(zipData);
       }
 
       if (mounted) {
@@ -187,8 +330,19 @@ class _HomePageState extends State<HomePage> {
           _isSelectionMode = false;
           _selectedIds.clear();
         });
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text("🎉 批量导出成功！"), backgroundColor: Colors.teal));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text("🎉 批量导出成功！"),
+          backgroundColor: Colors.teal,
+          action: (Platform.isAndroid || Platform.isIOS)
+              ? SnackBarAction(
+                  label: '分享/保存',
+                  textColor: Colors.white,
+                  onPressed: () async {
+                    // 1. 等待用户操作分享面板（无论是分享成功还是取消）
+                    await Share.shareXFiles([XFile(savePath!)]);
+                  })
+              : null,
+        ));
       }
     } catch (e) {
       if (mounted) {
@@ -278,223 +432,460 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final themeColor = Theme.of(context).primaryColor;
-
-    return Scaffold(
-      appBar: CustomTitleBar(
-        backgroundColor: _isSelectionMode ? Colors.blueGrey : themeColor,
-        leading: _isSelectionMode
-            ? IconButton(
-                icon: const Icon(Icons.close, color: Colors.white),
-                onPressed: () {
-                  setState(() {
-                    _isSelectionMode = false;
-                    _selectedIds.clear();
-                  });
-                })
-            : (_isSearching 
-                ? IconButton(
-                    icon: const Icon(Icons.arrow_back, color: Colors.white),
-                    tooltip: '退出搜索',
-                    onPressed: () {
-                      setState(() {
-                        _isSearching = false;
-                        _searchKeyword = "";
-                        _searchResults.clear();
-                      });
-                    })
-                : null),
-        title: _isSearching
-            ? Container(
-                height: 36,
-                margin: const EdgeInsets.only(right: 30),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.15),
-                  borderRadius: BorderRadius.circular(18),
-                ),
-                child: TextField(
-                  autofocus: true,
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                  cursorColor: Colors.white,
-                  decoration: const InputDecoration(
-                    hintText: '输入日记标题、正文内容或标签查找...',
-                    hintStyle: TextStyle(color: Colors.white60),
-                    border: InputBorder.none,
-                    isDense: true,
-                    contentPadding: EdgeInsets.symmetric(vertical: 10),
-                    prefixIcon: Icon(Icons.search, color: Colors.white70, size: 18),
-                  ),
-                  onChanged: (val) {
-                    setState(() => _searchKeyword = val);
-                    _performSearch(val);
-                  },
-                ),
-              )
-            : Text(
-                _isSelectionMode
-                    ? '已选中 ${_selectedIds.length} 篇'
-                    : 'GrainBuds-小满日记',
-                style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                    fontFamily: !_isSelectionMode ? 'Georgia' : null,
-                    letterSpacing: !_isSelectionMode ? 1.5 : null)),
-        actions: [
-          if (_isSelectionMode)
-            IconButton(
-                icon: const Icon(Icons.ios_share, color: Colors.white),
-                tooltip: '批量导出',
-                onPressed: _showBatchExportMenu)
-        ],
-      ),
-      
-      body: Row(
+  // 💡 针对手机端重构的精美侧边抽屉菜单
+  Drawer _buildMobileDrawer(Color themeColor) {
+    return Drawer(
+      child: Column(
         children: [
-          // 🌟 终极修复：彻底抛弃有跳转 BUG 的 NavigationRail，换成丝滑无比的自定义动画侧边栏
-          if (!_isSearching && !_isSelectionMode)
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 250),
-              curve: Curves.easeOutCubic, // 让展开和收起更加顺滑
-              width: _isExtended ? 160 : 70, // 侧边栏宽度平滑过渡
-              color: themeColor.withOpacity(0.05),
+          DrawerHeader(
+            decoration: BoxDecoration(color: themeColor),
+            child: const SizedBox(
+              width: double.infinity,
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  // 顶部汉堡菜单按钮
-                  SizedBox(
-                    height: 70,
-                    child: Row(
-                      children: [
-                        SizedBox(
-                          width: 70,
-                          child: IconButton(
-                            icon: Icon(_isExtended ? Icons.menu_open : Icons.menu, color: Colors.grey),
-                            onPressed: () => setState(() => _isExtended = !_isExtended),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  
-                  // 主导航：日历视图
-                  _buildNavItem(0, Icons.calendar_month_outlined, Icons.calendar_month, '日历视图', themeColor),
-                  // 主导航：时间轴
-                  _buildNavItem(1, Icons.timeline_outlined, Icons.timeline, '时间轴', themeColor),
-                  
-                  const Spacer(),
-                  
-                  // 底部工具栏
-                  _buildSideActionButton(Icons.search, '全局搜索', () {
-                    setState(() {
-                      _isSearching = !_isSearching;
-                      if (!_isSearching) {
-                        _searchKeyword = "";
-                        _searchResults.clear();
-                      }
-                    });
-                  }),
-                  _buildCollectionMenu(),
-                  _buildSideActionButton(Icons.bar_chart, '统计报表', () {
-                    Navigator.push(context, MaterialPageRoute(builder: (context) => const StatsPage()));
-                  }),
-                  const SizedBox(height: 10),
-                  _buildSideActionButton(Icons.settings, '软件设置', () async {
-                    await Navigator.push(context, MaterialPageRoute(builder: (context) => const SettingsPage()));
-                    _refreshTrigger.value++;
-                  }),
-                  const SizedBox(height: 20),
+                  Text('GrainBuds',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold)),
+                  SizedBox(height: 8),
+                  Text('记录生活，留住感动',
+                      style: TextStyle(color: Colors.white70, fontSize: 14)),
                 ],
               ),
             ),
-
-          const VerticalDivider(thickness: 1, width: 1, color: Colors.black12),
-
-          Expanded(
-            child: _isSearching
-              ? (_searchKeyword.isEmpty
-                  ? Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.travel_explore, size: 80, color: themeColor.withOpacity(0.2)),
-                          const SizedBox(height: 16),
-                          const Text("在茫茫岁月中，你想寻找哪段记忆？", style: TextStyle(color: Colors.grey, fontSize: 16, letterSpacing: 1)),
-                        ],
-                      ),
-                    )
-                  : (_searchResults.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.sentiment_dissatisfied, size: 80, color: Colors.grey.shade300),
-                              const SizedBox(height: 16),
-                              Text("未找到包含 “$_searchKeyword” 的日记", style: const TextStyle(color: Colors.grey, fontSize: 16)),
-                            ],
-                          ),
-                        )
-                      : ListView.builder(
-                          padding: const EdgeInsets.only(top: 10, bottom: 40),
-                          itemCount: _searchResults.length,
-                          itemBuilder: (c, i) => DiaryCard(
-                              diary: _searchResults[i],
-                              onRefresh: () => _performSearch(_searchKeyword)))))
-              : IndexedStack(
-                  index: _currentIndex,
-                  children: [
-                    CalendarTab(refreshTrigger: _refreshTrigger),
-                    TimelineTab(
-                      refreshTrigger: _refreshTrigger,
-                      isSelectionMode: _isSelectionMode,
-                      selectedIds: _selectedIds,
-                      isDescending: _isDescending,
-                      onSelectionChanged: (id, selected) {
-                        setState(() {
-                          if (selected) _selectedIds.add(id);
-                          else _selectedIds.remove(id);
-                        });
-                      },
-                      onEnterSelectionMode: (startId) {
-                        setState(() {
-                          _isSelectionMode = true;
-                          _selectedIds.add(startId);
-                        });
-                      },
-                    ),
-                  ],
-                ),
           ),
+          ListTile(
+            leading: const Icon(Icons.search, color: Colors.blueGrey),
+            title: const Text('全局搜索',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            onTap: () {
+              Navigator.pop(context); // 关闭抽屉
+              setState(() {
+                _isSearching = true;
+                _searchKeyword = "";
+                _searchResults.clear();
+              });
+            },
+          ),
+          // 💡 将归类收藏用 ExpansionTile 优雅地收纳起来
+          ExpansionTile(
+            leading:
+                const Icon(Icons.collections_bookmark, color: Colors.blueGrey),
+            title: const Text('归类收藏',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            children: [
+              ListTile(
+                  contentPadding: const EdgeInsets.only(left: 50),
+                  leading: const Icon(Icons.sell_outlined, color: Colors.teal),
+                  title: const Text('标签聚合墙'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (context) => const TagsPage()));
+                  }),
+              ListTile(
+                  contentPadding: const EdgeInsets.only(left: 50),
+                  leading: const Icon(Icons.star, color: Colors.amber),
+                  title: const Text('星标日记'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (context) =>
+                                const CollectionPage(type: 'starred')));
+                  }),
+              ListTile(
+                  contentPadding: const EdgeInsets.only(left: 50),
+                  leading: const Icon(Icons.archive, color: Colors.brown),
+                  title: const Text('归档记录'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (context) =>
+                                const CollectionPage(type: 'archived')));
+                  }),
+            ],
+          ),
+          ListTile(
+            leading: const Icon(Icons.event_note, color: Colors.blueGrey),
+            title: const Text('时光看板', style: TextStyle(fontWeight: FontWeight.bold)),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(context, MaterialPageRoute(builder: (context) => const AnniversariesPage()));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.bar_chart, color: Colors.blueGrey),
+            title: const Text('统计报表',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(context,
+                  MaterialPageRoute(builder: (context) => const StatsPage()));
+            },
+          ),
+          const Spacer(),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.settings, color: Colors.blueGrey),
+            title: const Text('软件设置',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            onTap: () async {
+              Navigator.pop(context);
+              await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (context) => const SettingsPage()));
+              _refreshTrigger.value++;
+            },
+          ),
+          const SizedBox(height: 20),
         ],
       ),
-      
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final themeColor = Theme.of(context).primaryColor;
+    // 💡 核心新增：判断当前是否是手机端
+    final bool isMobile = Platform.isAndroid || Platform.isIOS;
+
+    // 1. 构建中间的主体内容区
+    Widget mainContent = _isSearching
+        ? (_searchKeyword.isEmpty
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.travel_explore,
+                        size: 80, color: themeColor.withOpacity(0.2)),
+                    const SizedBox(height: 16),
+                    const Text("在茫茫岁月中，你想寻找哪段记忆？",
+                        style: TextStyle(
+                            color: Colors.grey,
+                            fontSize: 16,
+                            letterSpacing: 1)),
+                  ],
+                ),
+              )
+            : (_searchResults.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.sentiment_dissatisfied,
+                            size: 80, color: Colors.grey.shade300),
+                        const SizedBox(height: 16),
+                        Text("未找到包含 “$_searchKeyword” 的日记",
+                            style: const TextStyle(
+                                color: Colors.grey, fontSize: 16)),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    // 💡 新增：当用户手指在这个列表中滑动时，立刻自动收起软键盘
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    padding: const EdgeInsets.only(top: 10, bottom: 40),
+                    itemCount: _searchResults.length,
+                    itemBuilder: (c, i) => DiaryCard(
+                        diary: _searchResults[i],
+                        onRefresh: () => _performSearch(_searchKeyword)))))
+        // 💡 核心分离：手机端用 PageView 滑动，电脑端用 IndexedStack 原地切换
+        : (isMobile
+            ? PageView(
+                controller: _pageController,
+                onPageChanged: (index) {
+                  setState(() => _currentIndex = index);
+                },
+                children: [
+                  CalendarTab(refreshTrigger: _refreshTrigger),
+                  TimelineTab(
+                    refreshTrigger: _refreshTrigger,
+                    isSelectionMode: _isSelectionMode,
+                    selectedIds: _selectedIds,
+                    isDescending: _isDescending,
+                    onSelectionChanged: (id, selected) {
+                      setState(() {
+                        if (selected)
+                          _selectedIds.add(id);
+                        else
+                          _selectedIds.remove(id);
+                      });
+                    },
+                    onEnterSelectionMode: (startId) {
+                      setState(() {
+                        _isSelectionMode = true;
+                        _selectedIds.add(startId);
+                      });
+                    },
+                  ),
+                ],
+              )
+            : IndexedStack(
+                index: _currentIndex,
+                children: [
+                  CalendarTab(refreshTrigger: _refreshTrigger),
+                  TimelineTab(
+                    refreshTrigger: _refreshTrigger,
+                    isSelectionMode: _isSelectionMode,
+                    selectedIds: _selectedIds,
+                    isDescending: _isDescending,
+                    onSelectionChanged: (id, selected) {
+                      setState(() {
+                        if (selected)
+                          _selectedIds.add(id);
+                        else
+                          _selectedIds.remove(id);
+                      });
+                    },
+                    onEnterSelectionMode: (startId) {
+                      setState(() {
+                        _isSelectionMode = true;
+                        _selectedIds.add(startId);
+                      });
+                    },
+                  ),
+                ],
+              ));
+
+    return Scaffold(
+      drawerEdgeDragWidth: 60.0,
+      // 💡 只有手机端，且非选择/非搜索模式下才启用抽屉
+      drawer: (isMobile && !_isSelectionMode && !_isSearching)
+          ? _buildMobileDrawer(themeColor)
+          : null,
+
+      appBar: isMobile
+          ? AppBar(
+              backgroundColor: _isSelectionMode ? Colors.blueGrey : themeColor,
+              foregroundColor: Colors.white,
+              leading: _isSelectionMode
+                  ? IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () {
+                        setState(() {
+                          _isSelectionMode = false;
+                          _selectedIds.clear();
+                        });
+                      })
+                  : (_isSearching
+                      ? IconButton(
+                          icon: const Icon(Icons.arrow_back),
+                          onPressed: () {
+                            setState(() {
+                              _isSearching = false;
+                              _searchKeyword = "";
+                              _searchResults.clear();
+                            });
+                          })
+                      : null),
+              title: _isSearching
+                  ? TextField(
+                      autofocus: true,
+                      style: const TextStyle(color: Colors.white, fontSize: 16),
+                      cursorColor: Colors.white,
+                      decoration: const InputDecoration(
+                          hintText: '搜索...',
+                          hintStyle: TextStyle(color: Colors.white60),
+                          border: InputBorder.none),
+                      onChanged: (val) {
+                        setState(() => _searchKeyword = val);
+                        _performSearch(val);
+                      },
+                    )
+                  : Text(
+                      _isSelectionMode
+                          ? '已选中 ${_selectedIds.length} 篇'
+                          : (_currentIndex == 0 ? '日历视图' : '时间轴'),
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+              actions: [
+                if (_isSelectionMode)
+                  IconButton(
+                      icon: const Icon(Icons.ios_share),
+                      onPressed: _showBatchExportMenu)
+              ],
+            ) as PreferredSizeWidget
+          : CustomTitleBar(
+              backgroundColor: _isSelectionMode ? Colors.blueGrey : themeColor,
+              leading: _isSelectionMode
+                  ? IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white),
+                      onPressed: () {
+                        setState(() {
+                          _isSelectionMode = false;
+                          _selectedIds.clear();
+                        });
+                      })
+                  : (_isSearching
+                      ? IconButton(
+                          icon:
+                              const Icon(Icons.arrow_back, color: Colors.white),
+                          onPressed: () {
+                            setState(() {
+                              _isSearching = false;
+                              _searchKeyword = "";
+                              _searchResults.clear();
+                            });
+                          })
+                      : null),
+              title: _isSearching
+                  ? Container(
+                      height: 36,
+                      margin: const EdgeInsets.only(right: 30),
+                      decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(18)),
+                      child: TextField(
+                          autofocus: true,
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 14),
+                          decoration: const InputDecoration(
+                              hintText: '搜索...',
+                              border: InputBorder.none,
+                              prefixIcon: Icon(Icons.search,
+                                  color: Colors.white70, size: 18)),
+                          onChanged: (val) {
+                            setState(() => _searchKeyword = val);
+                            _performSearch(val);
+                          }),
+                    )
+                  : Text(
+                      _isSelectionMode
+                          ? '已选中 ${_selectedIds.length} 篇'
+                          : 'GrainBuds-小满日记',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          fontFamily: !_isSelectionMode ? 'Georgia' : null,
+                          letterSpacing: !_isSelectionMode ? 1.5 : null)),
+              actions: [
+                if (_isSelectionMode)
+                  IconButton(
+                      icon: const Icon(Icons.ios_share, color: Colors.white),
+                      onPressed: _showBatchExportMenu)
+              ],
+            ) as PreferredSizeWidget,
+
+      // 💡 核心分离：手机端直接展示主内容，电脑端恢复 Row 左右分栏布局
+      body: isMobile
+          ? mainContent
+          : Row(
+              children: [
+                if (!_isSearching && !_isSelectionMode)
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 250),
+                    curve: Curves.easeOutCubic,
+                    width: _isExtended ? 160 : 70,
+                    color: themeColor.withOpacity(0.05),
+                    child: Column(
+                      children: [
+                        SizedBox(
+                          height: 70,
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 70,
+                                child: IconButton(
+                                  icon: Icon(
+                                      _isExtended
+                                          ? Icons.menu_open
+                                          : Icons.menu,
+                                      color: Colors.grey),
+                                  onPressed: () => setState(
+                                      () => _isExtended = !_isExtended),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        _buildNavItem(0, Icons.calendar_month_outlined,
+                            Icons.calendar_month, '日历视图', themeColor),
+                        _buildNavItem(1, Icons.timeline_outlined,
+                            Icons.timeline, '时间轴', themeColor),
+                        const Spacer(),
+                        _buildSideActionButton(Icons.search, '全局搜索', () {
+                          setState(() {
+                            _isSearching = !_isSearching;
+                            if (!_isSearching) {
+                              _searchKeyword = "";
+                              _searchResults.clear();
+                            }
+                          });
+                        }),
+                        _buildSideActionButton(Icons.event_note, '时光看板', () {
+                          Navigator.push(context, MaterialPageRoute(builder: (context) => const AnniversariesPage()));
+                        }),
+                        _buildCollectionMenu(),
+                        _buildSideActionButton(Icons.bar_chart, '统计报表', () {
+                          Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (context) => const StatsPage()));
+                        }),
+                        const SizedBox(height: 10),
+                        _buildSideActionButton(Icons.settings, '软件设置',
+                            () async {
+                          await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (context) => const SettingsPage()));
+                          _refreshTrigger.value++;
+                        }),
+                        const SizedBox(height: 20),
+                      ],
+                    ),
+                  ),
+                if (!_isSearching && !_isSelectionMode)
+                  const VerticalDivider(
+                      thickness: 1, width: 1, color: Colors.black12),
+                Expanded(child: mainContent),
+              ],
+            ),
+
       floatingActionButton: FloatingActionButton(
         backgroundColor: themeColor,
         onPressed: () {
           showModalBottomSheet(
             context: context,
-            shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+            shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
             builder: (c) => SafeArea(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   ListTile(
-                    leading: CircleAvatar(backgroundColor: themeColor, child: const Icon(Icons.book, color: Colors.white)),
+                    leading: CircleAvatar(
+                        backgroundColor: themeColor,
+                        child: const Icon(Icons.book, color: Colors.white)),
                     title: const Text('写日记'),
                     subtitle: const Text('记录今天的故事和感悟'),
                     onTap: () async {
                       Navigator.pop(c);
-                      final result = await Navigator.push(context, createSmoothRoute(const DiaryEditPage(entryType: 0)));
+                      final result = await Navigator.push(context,
+                          createSmoothRoute(const DiaryEditPage(entryType: 0)));
                       if (result == true) _refreshTrigger.value++;
                     },
                   ),
                   ListTile(
-                    leading: CircleAvatar(backgroundColor: Colors.green.shade500, child: const Icon(Icons.bolt, color: Colors.white)),
+                    leading: CircleAvatar(
+                        backgroundColor: Colors.green.shade500,
+                        child: const Icon(Icons.bolt, color: Colors.white)),
                     title: const Text('随手记'),
                     subtitle: const Text('快速记录闪念、灵感或待办'),
                     onTap: () async {
                       Navigator.pop(c);
-                      final result = await Navigator.push(context, createSmoothRoute(const DiaryEditPage(entryType: 1)));
+                      final result = await Navigator.push(context,
+                          createSmoothRoute(const DiaryEditPage(entryType: 1)));
                       if (result == true) _refreshTrigger.value++;
                     },
                   ),
@@ -508,30 +899,35 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // ================= 新增：丝滑无跳动的侧边栏组件 =================
+  // ================= 恢复电脑端专属侧边栏组件 =================
 
-  Widget _buildNavItem(int index, IconData unselectedIcon, IconData selectedIcon, String label, Color themeColor) {
+  Widget _buildNavItem(int index, IconData unselectedIcon,
+      IconData selectedIcon, String label, Color themeColor) {
     final isSelected = _currentIndex == index;
     final color = isSelected ? themeColor : Colors.grey;
-    
     return Material(
       color: Colors.transparent,
       child: InkWell(
+        // 💡 注意这里去掉了 PageView 的控制逻辑，改回原来的 setState 切换
         onTap: () => setState(() => _currentIndex = index),
         child: SizedBox(
-          height: 56, // 导航项高度
+          height: 56,
           child: Row(
             children: [
-              // 💡 魔法 1：永远固定在 70 像素的盒子里，图标死也不会乱动！
-              SizedBox(width: 70, child: Icon(isSelected ? selectedIcon : unselectedIcon, color: color)),
-              // 💡 魔法 2：剩余空间交给文字，利用 clip 裁剪实现像拉开幕布一样的文字显隐效果
+              SizedBox(
+                  width: 70,
+                  child: Icon(isSelected ? selectedIcon : unselectedIcon,
+                      color: color)),
               Expanded(
                 child: Text(
                   label,
-                  style: TextStyle(color: color, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal),
+                  style: TextStyle(
+                      color: color,
+                      fontWeight:
+                          isSelected ? FontWeight.bold : FontWeight.normal),
                   maxLines: 1,
-                  softWrap: false, // 禁止换行
-                  overflow: TextOverflow.clip, // 边缘直接裁剪，形成幕布滑动效果
+                  softWrap: false,
+                  overflow: TextOverflow.clip,
                 ),
               ),
             ],
@@ -541,7 +937,8 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildSideActionButton(IconData icon, String label, VoidCallback onTap) {
+  Widget _buildSideActionButton(
+      IconData icon, String label, VoidCallback onTap) {
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -552,13 +949,12 @@ class _HomePageState extends State<HomePage> {
             children: [
               SizedBox(width: 70, child: Icon(icon, color: Colors.blueGrey)),
               Expanded(
-                child: Text(
-                  label,
-                  style: const TextStyle(color: Colors.blueGrey, fontWeight: FontWeight.bold),
-                  maxLines: 1,
-                  softWrap: false,
-                  overflow: TextOverflow.clip,
-                ),
+                child: Text(label,
+                    style: const TextStyle(
+                        color: Colors.blueGrey, fontWeight: FontWeight.bold),
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.clip),
               ),
             ],
           ),
@@ -574,51 +970,183 @@ class _HomePageState extends State<HomePage> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       onSelected: (value) {
         if (value == 'tags') {
-          Navigator.push(context, MaterialPageRoute(builder: (context) => const TagsPage()));
+          Navigator.push(context,
+              MaterialPageRoute(builder: (context) => const TagsPage()));
         } else if (value == 'starred') {
-          Navigator.push(context, MaterialPageRoute(builder: (context) => const CollectionPage(type: 'starred')));
+          Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (context) => const CollectionPage(type: 'starred')));
         } else if (value == 'archived') {
-          Navigator.push(context, MaterialPageRoute(builder: (context) => const CollectionPage(type: 'archived')));
+          Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (context) =>
+                      const CollectionPage(type: 'archived')));
         }
       },
       itemBuilder: (context) => <PopupMenuEntry<String>>[
         const PopupMenuItem<String>(
-          value: 'tags',
-          child: Row(children: [Icon(Icons.sell_outlined, color: Colors.teal), SizedBox(width: 12), Text('标签聚合墙')]),
-        ),
+            value: 'tags',
+            child: Row(children: [
+              Icon(Icons.sell_outlined, color: Colors.teal),
+              SizedBox(width: 12),
+              Text('标签聚合墙')
+            ])),
         const PopupMenuItem<String>(
-          value: 'starred',
-          child: Row(children: [Icon(Icons.star, color: Colors.amber), SizedBox(width: 12), Text('星标日记')]),
-        ),
+            value: 'starred',
+            child: Row(children: [
+              Icon(Icons.star, color: Colors.amber),
+              SizedBox(width: 12),
+              Text('星标日记')
+            ])),
         const PopupMenuDivider(),
         const PopupMenuItem<String>(
-          value: 'archived',
-          child: Row(children: [Icon(Icons.archive, color: Colors.brown), SizedBox(width: 12), Text('归档记录')]),
-        ),
+            value: 'archived',
+            child: Row(children: [
+              Icon(Icons.archive, color: Colors.brown),
+              SizedBox(width: 12),
+              Text('归档记录')
+            ])),
       ],
-      // 这里的 child 就是显示在侧边栏上的按钮本体
       child: SizedBox(
         height: 50,
         child: Row(
           children: [
-            const SizedBox(width: 70, child: Icon(Icons.collections_bookmark, color: Colors.blueGrey)),
+            const SizedBox(
+                width: 70,
+                child:
+                    Icon(Icons.collections_bookmark, color: Colors.blueGrey)),
             const Expanded(
-              child: Text(
-                '归类收藏',
-                style: TextStyle(color: Colors.blueGrey, fontWeight: FontWeight.bold),
-                maxLines: 1,
-                softWrap: false,
-                overflow: TextOverflow.clip,
-              ),
-            ),
+                child: Text('归类收藏',
+                    style: TextStyle(
+                        color: Colors.blueGrey, fontWeight: FontWeight.bold),
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.clip)),
           ],
         ),
       ),
     );
   }
-}
 
-// ========= Tab 1: 日历页 =========
+  // ================= 💡 新增：PDF 专属 Markdown 解析器 (终极完美版) =================
+  List<pw.Widget> _renderMarkdown(
+      String text, pw.Font regular, pw.Font bold, pw.Font emoji) {
+    List<pw.Widget> widgets = [];
+    final lines = text.split('\n');
+
+    // 💡 核心修复 1：强制显式注入 fallback，确保每一行文字哪怕混排中英文，也绝对不会丢失 Emoji
+    final fallbackStyle = pw.TextStyle(font: regular, fontFallback: [emoji]);
+    final fallbackBoldStyle = pw.TextStyle(font: bold, fontFallback: [emoji]);
+
+    for (String line in lines) {
+      String trimmed = line.trim();
+      if (trimmed.isEmpty) {
+        widgets.add(pw.SizedBox(height: 8));
+      } else if (trimmed.startsWith('# ')) {
+        widgets.add(pw.Padding(
+            padding: const pw.EdgeInsets.only(top: 12, bottom: 6),
+            child: pw.Text(trimmed.substring(2),
+                style: pw.TextStyle(
+                    font: bold, fontSize: 20, fontFallback: [emoji]))));
+      } else if (trimmed.startsWith('## ')) {
+        widgets.add(pw.Padding(
+            padding: const pw.EdgeInsets.only(top: 10, bottom: 4),
+            child: pw.Text(trimmed.substring(3),
+                style: pw.TextStyle(
+                    font: bold, fontSize: 18, fontFallback: [emoji]))));
+      } else if (trimmed.startsWith('### ')) {
+        widgets.add(pw.Padding(
+            padding: const pw.EdgeInsets.only(top: 8, bottom: 2),
+            child: pw.Text(trimmed.substring(4),
+                style: pw.TextStyle(
+                    font: bold, fontSize: 16, fontFallback: [emoji]))));
+      } else if (trimmed.startsWith('> ')) {
+        widgets.add(pw.Container(
+            margin: const pw.EdgeInsets.only(bottom: 6),
+            padding: const pw.EdgeInsets.only(left: 10),
+            decoration: const pw.BoxDecoration(
+                border: pw.Border(
+                    left: pw.BorderSide(color: PdfColors.grey, width: 3))),
+            child: _parseInline(trimmed.substring(2).trim(), fallbackStyle,
+                fallbackBoldStyle)));
+      } else if (trimmed.startsWith('- ') || trimmed.startsWith('*')) {
+        // 💡 核心修复 2：极高宽容度的正则匹配，完美兼容 ***加粗列表** 和 *无空格列表
+        String cleanLine = trimmed;
+        if (trimmed.startsWith('- ')) {
+          cleanLine = trimmed.substring(2).trim();
+        } else if (trimmed.startsWith('***')) {
+          cleanLine = trimmed.substring(1).trim(); // 剥离最外层的列表 *，保留里层的 ** 给加粗解析器
+        } else if (trimmed.startsWith('**')) {
+          // 如果只是纯加粗段落而不是列表，直接跳过列表渲染
+          widgets.add(pw.Padding(
+              padding: const pw.EdgeInsets.only(bottom: 4),
+              child: _parseInline(trimmed, fallbackStyle, fallbackBoldStyle)));
+          continue;
+        } else if (trimmed.startsWith('*')) {
+          cleanLine = trimmed.substring(1).trim();
+        }
+
+        widgets.add(pw.Padding(
+            padding: const pw.EdgeInsets.only(left: 10, bottom: 4),
+            child: pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  // 💡 核心修复 3：直接用画笔画一个纯黑的实心圆！彻底避免特殊字符乱码！
+                  pw.Padding(
+                    padding: const pw.EdgeInsets.only(top: 6, right: 8),
+                    child: pw.Container(
+                        width: 4,
+                        height: 4,
+                        decoration: const pw.BoxDecoration(
+                            shape: pw.BoxShape.circle, color: PdfColors.black)),
+                  ),
+                  pw.Expanded(
+                      child: _parseInline(
+                          cleanLine, fallbackStyle, fallbackBoldStyle))
+                ])));
+      } else {
+        widgets.add(pw.Padding(
+            padding: const pw.EdgeInsets.only(bottom: 4),
+            child: _parseInline(trimmed, fallbackStyle, fallbackBoldStyle)));
+      }
+    }
+    return widgets;
+  }
+
+  pw.Widget _parseInline(
+      String text, pw.TextStyle regularStyle, pw.TextStyle boldStyle,
+      {bool isQuote = false}) {
+    final RegExp exp = RegExp(r'\*\*(.*?)\*\*');
+    final Iterable<RegExpMatch> matches = exp.allMatches(text);
+
+    pw.TextStyle baseStyle = isQuote
+        ? regularStyle.copyWith(color: PdfColors.grey700)
+        : regularStyle;
+    pw.TextStyle bStyle =
+        isQuote ? boldStyle.copyWith(color: PdfColors.grey700) : boldStyle;
+
+    if (matches.isEmpty)
+      return pw.Text(text, style: baseStyle.copyWith(lineSpacing: 3));
+
+    List<pw.TextSpan> spans = [];
+    int lastMatchEnd = 0;
+    for (final match in matches) {
+      if (match.start > lastMatchEnd) {
+        spans.add(pw.TextSpan(
+            text: text.substring(lastMatchEnd, match.start), style: baseStyle));
+      }
+      spans.add(pw.TextSpan(text: match.group(1), style: bStyle));
+      lastMatchEnd = match.end;
+    }
+    if (lastMatchEnd < text.length) {
+      spans.add(
+          pw.TextSpan(text: text.substring(lastMatchEnd), style: baseStyle));
+    }
+    return pw.RichText(text: pw.TextSpan(children: spans));
+  }
+}
 
 // ========= Tab 1: 日历页 =========
 class CalendarTab extends StatefulWidget {
@@ -674,7 +1202,7 @@ class _CalendarTabState extends State<CalendarTab> {
       String? bestImg;
 
       for (var doc in dailyDocs.where((e) => e['type'] == 0)) {
-        List<String> imgs = _parseImages(doc['imagePath']);
+        List<String> imgs = _parseImages(doc['image_path'] ?? doc['imagePath']);
         if (imgs.isNotEmpty) {
           bestImg = imgs.first;
           break;
@@ -683,7 +1211,8 @@ class _CalendarTabState extends State<CalendarTab> {
 
       if (bestImg == null) {
         for (var doc in dailyDocs.where((e) => e['type'] == 1)) {
-          List<String> imgs = _parseImages(doc['imagePath']);
+          List<String> imgs =
+              _parseImages(doc['image_path'] ?? doc['imagePath']);
           if (imgs.isNotEmpty) {
             bestImg = imgs.first;
             break;
@@ -692,9 +1221,16 @@ class _CalendarTabState extends State<CalendarTab> {
       }
 
       if (bestImg != null) {
-        covers[dateKey] = bestImg;
+        // 💡 核心修复：把路径交给 UI 渲染前，先验证物理文件是否真的存在！
+        // 彻底切断 Image.file 去读取空气导致报错卡死调试器的问题
+        try {
+          if (File(bestImg).existsSync()) {
+            covers[dateKey] = bestImg;
+          }
+        } catch (_) {}
       }
     }
+
     setState(() {
       _dailyCoverImages = covers;
     });
@@ -712,7 +1248,6 @@ class _CalendarTabState extends State<CalendarTab> {
     }
   }
 
-  // 💡 保证绝对居中，且只用于有图片的日期
   Widget _buildCell(DateTime date, String imgPath,
       {bool isSelected = false, bool isToday = false}) {
     return Container(
@@ -737,6 +1272,7 @@ class _CalendarTabState extends State<CalendarTab> {
               width: 36,
               height: 36,
               fit: BoxFit.cover,
+              cacheWidth: 100,
               errorBuilder: (c, o, s) =>
                   const Icon(Icons.broken_image, size: 10, color: Colors.grey),
             ),
@@ -831,7 +1367,8 @@ class _CalendarTabState extends State<CalendarTab> {
                 Navigator.pop(c);
                 final result = await Navigator.push(
                     context,
-                    createSmoothRoute(DiaryEditPage(entryType: 0, selectedDate: _selectedDay)));
+                    createSmoothRoute(DiaryEditPage(
+                        entryType: 0, selectedDate: _selectedDay)));
                 if (result == true) widget.refreshTrigger.value++;
               },
             ),
@@ -845,7 +1382,8 @@ class _CalendarTabState extends State<CalendarTab> {
                 Navigator.pop(c);
                 final result = await Navigator.push(
                     context,
-                    createSmoothRoute(DiaryEditPage(entryType: 1, selectedDate: _selectedDay)));
+                    createSmoothRoute(DiaryEditPage(
+                        entryType: 1, selectedDate: _selectedDay)));
                 if (result == true) widget.refreshTrigger.value++;
               },
             ),
@@ -875,21 +1413,18 @@ class _CalendarTabState extends State<CalendarTab> {
             defaultBuilder: (context, date, focusedDay) {
               DateTime dateKey = DateTime(date.year, date.month, date.day);
               String? imgPath = _dailyCoverImages[dateKey];
-              // 💡 修复重点 1：如果没有图，直接 return null！完全交给插件原生渲染，不再出 bug。
               if (imgPath == null) return null;
               return _buildCell(date, imgPath);
             },
             selectedBuilder: (context, date, focusedDay) {
               DateTime dateKey = DateTime(date.year, date.month, date.day);
               String? imgPath = _dailyCoverImages[dateKey];
-              // 💡 修复重点 2：选中状态下没图也交还给插件原生渲染
               if (imgPath == null) return null;
               return _buildCell(date, imgPath, isSelected: true);
             },
             todayBuilder: (context, date, focusedDay) {
               DateTime dateKey = DateTime(date.year, date.month, date.day);
               String? imgPath = _dailyCoverImages[dateKey];
-              // 💡 修复重点 3：今天状态没图同样交还给原生
               if (imgPath == null) return null;
               return _buildCell(date, imgPath, isToday: true);
             },
@@ -900,7 +1435,6 @@ class _CalendarTabState extends State<CalendarTab> {
         Expanded(
             child: diaries.isEmpty
                 ? Center(
-                    // 💡 修复重点 4：加上 mainAxisSize.min，保证内容绝对居中不会被挤出屏幕
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -910,7 +1444,6 @@ class _CalendarTabState extends State<CalendarTab> {
                         Text(_getEmptyPlaceholder(),
                             style: const TextStyle(color: Colors.grey)),
                         const SizedBox(height: 20),
-                        // 💡 把按钮换成最醒目的样式
                         ElevatedButton.icon(
                           icon: Icon(_getWriteIcon()),
                           label: Text(_getWriteLabel(),
@@ -1083,69 +1616,109 @@ class _TimelineTabState extends State<TimelineTab> {
     final int id = diary['id'] as int;
     final String dateStr = diary['date'] as String;
     final DateTime date = DateTime.parse(dateStr);
-    
-    // 💡 视觉魔法：判断是否为特殊状态
+
     final bool isUnknownDate = dateStr.startsWith('1900-01-01');
     final bool isArchived = (diary['is_archived'] as int? ?? 0) == 1;
-    // 归档后的日记，时间轴线条和数字都会变成灰色
-    final Color lineColor = isArchived ? Colors.grey.shade400 : Theme.of(context).primaryColor;
+    final Color lineColor =
+        isArchived ? Colors.grey.shade400 : Theme.of(context).primaryColor;
+
+    // 💡 核心：区分双端尺寸，极致压缩手机端左侧宽度
+    bool isMobile = Platform.isAndroid || Platform.isIOS;
+    double leftWidth = isMobile ? 45.0 : 70.0;
+    double lineWidth = isMobile ? 20.0 : 30.0;
+    double dateFontSize = isMobile ? 18.0 : 22.0;
+    double monthFontSize = isMobile ? 10.0 : 12.0;
+    double timeFontSize = isMobile ? 9.0 : 10.0;
+    double iconSize = isMobile ? 18.0 : 24.0;
 
     return IntrinsicHeight(
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // 左侧：日期与时间
           SizedBox(
-            width: 70,
+            width: leftWidth,
             child: Padding(
-              padding: const EdgeInsets.only(top: 25, left: 12),
-              // 💡 特效 1：如果日期不可考，左侧变成沙漏
-              child: isUnknownDate 
-                ? const Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Icon(Icons.hourglass_empty, color: Colors.brown, size: 24),
-                      SizedBox(height: 4),
-                      Text("岁月深处", style: TextStyle(fontSize: 10, color: Colors.brown)),
-                    ],
-                  )
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Text("${date.day}", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: lineColor)),
-                      Text("${date.month}月", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                      Text(DateFormat('HH:mm').format(date), style: TextStyle(fontSize: 10, color: lineColor, fontWeight: FontWeight.w300)),
-                    ],
-                  ),
+              padding: EdgeInsets.only(
+                  top: 25, left: isMobile ? 4 : 12, right: isMobile ? 4 : 0),
+              child: isUnknownDate
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Icon(Icons.hourglass_empty,
+                            color: Colors.brown, size: iconSize),
+                        const SizedBox(height: 4),
+                        Text("岁月深处",
+                            style: TextStyle(
+                                fontSize: timeFontSize, color: Colors.brown)),
+                      ],
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text("${date.day}",
+                            style: TextStyle(
+                                fontSize: dateFontSize,
+                                fontWeight: FontWeight.bold,
+                                color: lineColor)),
+                        Text("${date.month}月",
+                            style: TextStyle(
+                                fontSize: monthFontSize, color: Colors.grey)),
+                        Text(DateFormat('HH:mm').format(date),
+                            style: TextStyle(
+                                fontSize: timeFontSize,
+                                color: lineColor,
+                                fontWeight: FontWeight.w300)),
+                      ],
+                    ),
             ),
           ),
+          // 中间：线与圆点
           SizedBox(
-            width: 30,
+            width: lineWidth,
             child: Stack(
               alignment: Alignment.center,
               children: [
-                VerticalDivider(color: lineColor.withOpacity(0.3), thickness: 2),
+                VerticalDivider(
+                    color: lineColor.withOpacity(0.3),
+                    thickness: isMobile ? 1.5 : 2),
                 Positioned(
                     top: 32,
                     child: Container(
-                        height: 12, width: 12,
+                        height: isMobile ? 10 : 12,
+                        width: isMobile ? 10 : 12,
                         decoration: BoxDecoration(
-                            color: isArchived ? Colors.grey.shade200 : Colors.white,
+                            color: isArchived
+                                ? Colors.grey.shade200
+                                : Colors.white,
                             shape: BoxShape.circle,
-                            border: Border.all(color: lineColor, width: 2),
-                            boxShadow: [BoxShadow(color: lineColor.withOpacity(0.2), blurRadius: 4)]))),
+                            border: Border.all(
+                                color: lineColor, width: isMobile ? 1.5 : 2),
+                            boxShadow: [
+                              BoxShadow(
+                                  color: lineColor.withOpacity(0.2),
+                                  blurRadius: 4)
+                            ]))),
               ],
             ),
           ),
+          // 右侧：日记卡片
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.only(right: 16.0, top: 10, bottom: 10),
+              padding: EdgeInsets.only(
+                  right: isMobile ? 12.0 : 16.0,
+                  top: isMobile ? 6 : 10,
+                  bottom: isMobile ? 6 : 10),
               child: DiaryCard(
                 diary: diary,
                 onRefresh: () => widget.refreshTrigger.value++,
                 isSelectionMode: widget.isSelectionMode,
                 isSelected: widget.selectedIds.contains(id),
-                onSelected: (selected) => widget.onSelectionChanged(id, selected),
+                onSelected: (selected) =>
+                    widget.onSelectionChanged(id, selected),
                 onLongPress: () => widget.onEnterSelectionMode(id),
+                heroTagPrefix: 'home_',
+                showDate: false,
               ),
             ),
           ),
@@ -1204,23 +1777,31 @@ class _TimelineTabState extends State<TimelineTab> {
       children: [
         filterBar,
         Expanded(
-          child: ListView(
+          child: ListView.builder(
             padding: const EdgeInsets.only(bottom: 80),
-            children: [
-              _buildOnThisDayBanner(),
-              ...allDiaries.asMap().entries.map((entry) {
-                int index = entry.key;
-                return _buildTimelineItem(
-                    entry.value, index == 0, index == allDiaries.length - 1);
-              }),
-            ],
+            // 💡 优化 1：按需渲染。如果有“历史上的今天”，总数要 +1
+            itemCount:
+                allDiaries.length + (onThisDayDiaries.isNotEmpty ? 1 : 0),
+            itemBuilder: (context, index) {
+              // 1. 如果有历史上的今天，并且是第 0 项，渲染 Banner
+              if (onThisDayDiaries.isNotEmpty && index == 0) {
+                return _buildOnThisDayBanner();
+              }
+
+              // 2. 计算日记在 allDiaries 中的真实索引
+              int diaryIndex = onThisDayDiaries.isNotEmpty ? index - 1 : index;
+
+              return _buildTimelineItem(allDiaries[diaryIndex], diaryIndex == 0,
+                  diaryIndex == allDiaries.length - 1);
+            },
           ),
         ),
       ],
     );
   }
 }
-// ================= 新增：全局丝滑路由切换工具 =================
+
+// ================= 全局丝滑路由切换工具 =================
 Route createSmoothRoute(Widget page) {
   return PageRouteBuilder(
     pageBuilder: (context, animation, secondaryAnimation) => page,
@@ -1228,8 +1809,8 @@ Route createSmoothRoute(Widget page) {
       return FadeTransition(
         opacity: animation.drive(CurveTween(curve: Curves.easeOutCubic)),
         child: ScaleTransition(
-          // 从 0.95 微微放大到 1.0，非常高级的推入感
-          scale: animation.drive(Tween(begin: 0.95, end: 1.0).chain(CurveTween(curve: Curves.easeOutCubic))),
+          scale: animation.drive(Tween(begin: 0.95, end: 1.0)
+              .chain(CurveTween(curve: Curves.easeOutCubic))),
           child: child,
         ),
       );

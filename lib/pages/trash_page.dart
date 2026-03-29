@@ -74,7 +74,7 @@ class _TrashPageState extends State<TrashPage> {
         setState(() => _autoCleanDays = days);
         if (mounted) {
           Navigator.pop(dialogContext);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已更改为: $label'), backgroundColor: Colors.teal));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已更改为: $label'), backgroundColor: Theme.of(context).primaryColor));
         }
       },
     );
@@ -149,7 +149,7 @@ class _TrashPageState extends State<TrashPage> {
             ? IconButton(icon: const Icon(Icons.close), onPressed: _exitSelectionMode) 
             : null,
         title: Text(_isSelectionMode ? '已选 ${_selectedIds.length} 项' : '回收站'),
-        backgroundColor: _isSelectionMode ? Colors.blueGrey : Colors.teal,
+        backgroundColor: _isSelectionMode ? Colors.blueGrey : Theme.of(context).primaryColor,
         foregroundColor: Colors.white,
         actions: [
           if (_isSelectionMode)
@@ -177,7 +177,7 @@ class _TrashPageState extends State<TrashPage> {
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
-                    color: Colors.orange.shade50,
+                    color: Theme.of(context).primaryColor.withOpacity(0.1),
                     child: Row(
                       children: [
                         Icon(Icons.lightbulb_outline, size: 16, color: Colors.orange.shade800),

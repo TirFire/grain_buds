@@ -8,6 +8,8 @@ import 'package:media_kit/media_kit.dart'; // 💡 引入媒体引擎
 import 'package:window_manager/window_manager.dart'; 
 import 'core/database_helper.dart';
 import 'pages/home_page.dart';
+import '../core/encryption_service.dart'; 
+import 'package:flutter_native_splash/flutter_native_splash.dart';
 
 final ValueNotifier<Color> globalThemeColor = ValueNotifier<Color>(Colors.teal);
 final GlobalKey<NavigatorState> globalNavigatorKey = GlobalKey<NavigatorState>();
@@ -15,24 +17,26 @@ final ValueNotifier<ThemeMode> globalThemeMode = ValueNotifier(ThemeMode.light);
 final ValueNotifier<bool> globalEyeCareMode = ValueNotifier(false);
 
 void main() async {
+  // 1. 绑定 Flutter 引擎
   WidgetsFlutterBinding.ensureInitialized();
-  MediaKit.ensureInitialized();
-
+  WidgetsBinding widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
+  FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
+  // 2. 数据库工厂分离 (仅需执行一次)
   if (Platform.isWindows || Platform.isLinux) {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
   }
 
-  // 💡 核心新增：初始化窗口管理器，隐藏原生系统标题栏
+  // 3. 窗口管理器 (仅限桌面端)
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     await windowManager.ensureInitialized();
     WindowOptions windowOptions = const WindowOptions(
-      size: Size(1000, 750), // 默认窗口大小
-      minimumSize: Size(800, 600), // 最小窗口大小
-      center: true, // 启动时居中
+      size: Size(1000, 750), 
+      minimumSize: Size(800, 600), 
+      center: true, 
       backgroundColor: Colors.transparent,
       skipTaskbar: false,
-      titleBarStyle: TitleBarStyle.hidden, // 👑 这一句直接干掉系统白色标题栏！
+      titleBarStyle: TitleBarStyle.hidden, 
     );
     windowManager.waitUntilReadyToShow(windowOptions, () async {
       await windowManager.show();
@@ -40,9 +44,11 @@ void main() async {
     });
   }
 
+  // 4. 读取轻量级配置 (SharedPreferences)
   final prefs = await SharedPreferences.getInstance();
   final int autoCleanDays = prefs.getInt('auto_clean_days') ?? 30;
   DatabaseHelper.instance.autoCleanTrash(autoCleanDays);
+  
   final bool useLock = prefs.getBool('use_lock') ?? false;
   final String lockPwd = prefs.getString('lock_pwd') ?? '';
   final String lockQuestion = prefs.getString('lock_question') ?? '';
@@ -51,13 +57,26 @@ void main() async {
   globalThemeMode.value = (prefs.getBool('is_dark') ?? false) ? ThemeMode.dark : ThemeMode.light;
   globalEyeCareMode.value = prefs.getBool('is_eye_care') ?? false;
   
-
   final int? colorValue = prefs.getInt('themeColor');
   if (colorValue != null) {
     globalThemeColor.value = Color(colorValue);
   }
 
-  runApp(MyDiaryApp(useLock: useLock, lockPwd: lockPwd, lockQuestion: lockQuestion, lockAnswer: lockAnswer));
+  // 5. 💡 媒体引擎初始化：放在最后，且带有错误拦截，不卡死主界面
+  try {
+    MediaKit.ensureInitialized(); 
+  } catch (e) {
+    debugPrint("媒体引擎初始化警告: $e");
+  }
+  FlutterNativeSplash.remove();
+
+  // 6. 瞬间点亮 UI
+  runApp(MyDiaryApp(
+    useLock: useLock, 
+    lockPwd: lockPwd, 
+    lockQuestion: lockQuestion, 
+    lockAnswer: lockAnswer
+  ));
 }
 
 class MyDiaryApp extends StatefulWidget {
@@ -138,7 +157,7 @@ class _MyDiaryAppState extends State<MyDiaryApp> {
                         useMaterial3: true,
                       );
 
-                  return MaterialApp(
+                 return MaterialApp(
                     navigatorKey: globalNavigatorKey,
                     title: 'GrainBuds',
                     debugShowCheckedModeBanner: false,
@@ -149,8 +168,20 @@ class _MyDiaryAppState extends State<MyDiaryApp> {
                       colorScheme: ColorScheme.dark(primary: themeColor),
                       appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF1E1E1E)),
                     ),
+                    
+                    // ==========================================
+                    // 💡 核心修复：全局屏蔽手机系统的字体与显示比例放大
+                    // ==========================================
+                    builder: (context, child) {
+                      return MediaQuery(
+                        // 强制将字体缩放比例锁定为 1.0（不受手机系统设置影响）
+                        data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(1.0)),
+                        child: child!,
+                      );
+                    },
+                    
                     home: widget.useLock && widget.lockPwd.isNotEmpty
-                        ? LockScreen(correctPwd: widget.lockPwd, question: widget.lockQuestion, answer: widget.lockAnswer, isInitialLaunch: true) // 💡 首次启动标记为 true
+                        ? LockScreen(correctPwd: widget.lockPwd, question: widget.lockQuestion, answer: widget.lockAnswer, isInitialLaunch: true) 
                         : const HomePage(),
                   );
                 }
@@ -188,8 +219,8 @@ class _LockScreenState extends State<LockScreen> {
   bool _hasError = false;
 
   void _checkPwd() {
-    if (_pwdController.text == widget.correctPwd) {
-      if (widget.onUnlock != null) widget.onUnlock!(); // 💡 呼叫回调，告诉外界我已经解锁了
+    if (EncryptionService.verifyPassword(_pwdController.text, widget.correctPwd)) {
+      if (widget.onUnlock != null) widget.onUnlock!();
       
       if (widget.isInitialLaunch) {
         // 如果是刚打开软件，解锁后推入主页

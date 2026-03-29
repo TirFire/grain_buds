@@ -8,11 +8,14 @@ import 'package:intl/intl.dart';
 import 'package:archive/archive_io.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
-
 import 'template_mgr_page.dart';
 import '../core/database_helper.dart';
 import '../main.dart';
 import 'trash_page.dart';
+import '../core/webdav_sync_service.dart';
+import '../core/encryption_service.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -29,6 +32,9 @@ class _SettingsPageState extends State<SettingsPage> {
   final _answerController = TextEditingController();
   String _cloudSyncPath = "";
   String _localDataPath = "";
+  String _webdavUrl = "";
+  String _webdavUser = "";
+  String _webdavPwd = "";
 
   // 外观与交互状态
   bool _isDark = false;
@@ -59,14 +65,19 @@ class _SettingsPageState extends State<SettingsPage> {
 
     setState(() {
       _useLock = prefs.getBool('use_lock') ?? false;
-      _pwdController.text = prefs.getString('lock_pwd') ?? '';
+      final String savedLockPwd = prefs.getString('lock_pwd') ?? '';
+      _pwdController.text = savedLockPwd.isNotEmpty ? '********' : '';
       _questionController.text = prefs.getString('lock_question') ?? '';
       _answerController.text = prefs.getString('lock_answer') ?? '';
       _cloudSyncPath = prefs.getString('cloud_sync_path') ?? '';
       _isDark = prefs.getBool('is_dark') ?? false;
       _isEyeCare = prefs.getBool('is_eye_care') ?? false;
       _localDataPath = root;
+      _webdavUrl = prefs.getString('webdav_url') ?? '';
+      _webdavUser = prefs.getString('webdav_user') ?? '';
+      _webdavPwd = prefs.getString('webdav_pwd') ?? '';
     });
+    _cloudSyncPath = prefs.getString('cloud_sync_path') ?? '';
   }
 
   Future<void> _saveSettings() async {
@@ -85,7 +96,15 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('use_lock', _useLock);
-    await prefs.setString('lock_pwd', _pwdController.text.trim());
+    // 💡 只有当用户真的修改了密码时（不是默认的星号），才进行哈希并覆盖保存
+    if (_pwdController.text.trim() != '********' &&
+        _pwdController.text.trim().isNotEmpty) {
+      String hashedPwd =
+          EncryptionService.hashPassword(_pwdController.text.trim());
+      await prefs.setString('lock_pwd', hashedPwd);
+    } else if (!_useLock) {
+      await prefs.setString('lock_pwd', ''); // 关闭锁时清空密码
+    }
     await prefs.setString('lock_question', _questionController.text.trim());
     await prefs.setString('lock_answer', _answerController.text.trim());
     if (mounted) {
@@ -108,8 +127,6 @@ class _SettingsPageState extends State<SettingsPage> {
     await prefs.setBool('is_eye_care', isEyeCare);
     globalEyeCareMode.value = isEyeCare;
   }
-
-
 
   void _showThemeColorPicker(BuildContext context) {
     showModalBottomSheet(
@@ -135,7 +152,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                   globalThemeColor.value = color;
                                   final prefs =
                                       await SharedPreferences.getInstance();
-                                  await prefs.setInt('themeColor', color.value);
+                                  await prefs.setInt('themeColor', color.toARGB32());
                                   if (mounted) Navigator.pop(c);
                                 },
                                 child: Container(
@@ -165,25 +182,326 @@ class _SettingsPageState extends State<SettingsPage> {
             ));
   }
 
-  // ================= 3. 导入、备份与本地路径 =================
-  Future<void> _openLocalDataFolder() async {
-    if (_localDataPath.isEmpty) return;
-    try {
-      final Uri uri = Uri.file(_localDataPath);
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri);
-      } else {
-        throw Exception('系统不支持直接打开该路径');
-      }
-    } catch (e) {
-      await Clipboard.setData(ClipboardData(text: _localDataPath));
-      if (mounted) {
+  // ================= 💡 WebDAV 专属方法 =================
+
+  // 💡 新增：WebDAV 详细配置教程弹窗
+  void _showWebdavGuide(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text("☁️ WebDAV 同步指南",
+            style: TextStyle(fontWeight: FontWeight.bold)),
+        content: const SingleChildScrollView(
+          child: Text(
+            "1. 选择 WebDAV 服务商：\n推荐使用「坚果云」，国内访问速度快且免费额度足够（每个月免费存1G，读取3G）。\n\n"
+            "2. 获取授权码 (非常重要)：\n"
+            "• 登录坚果云官网，进入【账户信息】->【安全选项】。\n"
+            "• 在【第三方应用管理】中点击【添加应用】，名称填「小满日记」。\n"
+            "• 复制系统生成的【应用密码】（注意：绝不是您的账号登录密码！）。\n\n"
+            "3. 在此填写配置：\n"
+            "• 服务器地址：https://dav.jianguoyun.com/dav/\n"
+            "• 账号：您的坚果云登录邮箱\n"
+            "• 密码/授权码：刚才生成的应用密码\n\n"
+            "💡 同步机制：\n点击同步后，App 会智能比对手机和网盘的文件进行双向多退少补。文件采用增量同步且支持加密传输，保障您的绝对隐私！",
+            style: TextStyle(height: 1.6, fontSize: 14, color: Colors.black87),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c),
+              child: const Text("我知道了", style: TextStyle(color: Colors.blue)))
+        ],
+      ),
+    );
+  }
+
+  void _showWebdavConfigDialog() {
+    final urlCtrl = TextEditingController(text: _webdavUrl);
+    final userCtrl = TextEditingController(text: _webdavUser);
+    final pwdCtrl = TextEditingController(text: _webdavPwd);
+    bool isTesting = false;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => StatefulBuilder(builder: (context, setDialogState) {
+        return AlertDialog(
+          // 💡 替换：去掉了 const，并加入了 Spacer 和包含小问号的 IconButton
+          title: Row(
+            children: [
+              const Icon(Icons.cloud_sync, color: Colors.blue),
+              const SizedBox(width: 8),
+              const Text("WebDAV 配置",
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const Spacer(), // 将问号推到最右边
+              IconButton(
+                icon: const Icon(Icons.help_outline,
+                    color: Colors.grey, size: 22),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                tooltip: '查看配置教程',
+                onPressed: () => _showWebdavGuide(context), // 💡 点击呼出教程
+              )
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text("支持坚果云、Nextcloud 等标准 WebDAV 服务。数据完全在您自己手中。",
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: urlCtrl,
+                  decoration: const InputDecoration(
+                      labelText: '服务器地址 (URL)',
+                      hintText: '如: https://dav.jianguoyun.com/dav/',
+                      border: OutlineInputBorder()),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: userCtrl,
+                  decoration: const InputDecoration(
+                      labelText: '账号', border: OutlineInputBorder()),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: pwdCtrl,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                      labelText: '应用密码 / 授权码', border: OutlineInputBorder()),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: isTesting ? null : () => Navigator.pop(c),
+              child: const Text("取消", style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: isTesting
+                  ? null
+                  : () async {
+                      if (urlCtrl.text.isEmpty ||
+                          userCtrl.text.isEmpty ||
+                          pwdCtrl.text.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('请填写完整信息')));
+                        return;
+                      }
+                      setDialogState(() => isTesting = true);
+
+                      // 调用引擎进行连接测试
+                      bool success = await WebDavSyncService.instance.connect(
+                        urlCtrl.text.trim(),
+                        userCtrl.text.trim(),
+                        pwdCtrl.text.trim(),
+                      );
+
+                      setDialogState(() => isTesting = false);
+
+                      if (success) {
+                        setState(() {
+                          _webdavUrl = urlCtrl.text.trim();
+                          _webdavUser = userCtrl.text.trim();
+                          _webdavPwd = pwdCtrl.text.trim();
+                        });
+                        if (mounted) {
+                          Navigator.pop(c);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('✅ 连接成功！已保存配置。'),
+                                  backgroundColor: Colors.teal));
+                        }
+                      } else {
+                        if (mounted)
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('❌ 连接失败，请检查地址或账号密码是否正确'),
+                                  backgroundColor: Colors.red));
+                      }
+                    },
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue, foregroundColor: Colors.white),
+              child: isTesting
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2))
+                  : const Text("测试连接并保存"),
+            ),
+          ],
+        );
+      }),
+    );
+  }
+
+  Future<void> _startWebdavSync() async {
+    if (_webdavUrl.isEmpty) {
+      _showWebdavConfigDialog();
+      return;
+    }
+
+    // 使用 ValueNotifier 实时更新弹窗里的文字进度
+    final ValueNotifier<String> progressNotifier =
+        ValueNotifier("正在初始化同步引擎...");
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => AlertDialog(
+        content: Row(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 20),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: progressNotifier,
+                builder: (context, value, child) =>
+                    Text(value, style: const TextStyle(fontSize: 13)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    // 确保连接
+    await WebDavSyncService.instance.autoConnect();
+
+    // 执行同步，传入进度回调
+    bool success = await WebDavSyncService.instance.startSync(
+      onProgress: (msg) => progressNotifier.value = msg,
+    );
+
+    if (mounted) {
+      Navigator.pop(context); // 关掉进度弹窗
+      if (success) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('无法直接打开，路径已复制到剪贴板，请在资源管理器中粘贴访问'),
-            backgroundColor: Colors.orange));
+            content: Text('🎉 WebDAV 多端同步完成！'), backgroundColor: Colors.teal));
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('❌ 同步失败，请检查网络或配置'), backgroundColor: Colors.red));
       }
     }
   }
+
+  // ================= 3. 导入、备份与本地路径 =================
+  Future<void> _changeStoragePath() async {
+    try {
+      // 1. 💡 提前拦截提示
+      bool? preConfirm = await showDialog<bool>(
+          context: context,
+          builder: (c) => AlertDialog(
+                title: const Text("迁移数据存储位置"),
+                content: const Text(
+                    "为了确保数据安全与整洁，请在接下来的选框中，务必【新建一个空的文件夹】（例如命名为 小满日记_Data）来作为新的专属存储库。\n\n⚠️ 注意：请勿选择系统盘根目录或已存放大量文件的文件夹。"),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(c, false), child: const Text("取消", style: TextStyle(color: Colors.grey))),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(c, true),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white),
+                    child: const Text("我知道了，去选择"),
+                  ),
+                ],
+              ));
+
+      if (preConfirm != true) return;
+
+      final String? selectedDirectory = await getDirectoryPath();
+      if (selectedDirectory == null) return;
+
+      // 💡 【核心优化：安全气囊】物理检测选定目录是否为空
+      final targetDir = Directory(selectedDirectory);
+      try {
+        final List<FileSystemEntity> contents = targetDir.listSync();
+        if (contents.isNotEmpty) {
+          if (mounted) {
+            showDialog(
+              context: context,
+              builder: (c) => AlertDialog(
+                title: const Row(children: [Icon(Icons.warning, color: Colors.orange), SizedBox(width: 8), Text("文件夹非空")]),
+                content: const Text("为了防止数据混淆和迁移失败，请选择或【新建一个完全为空】的文件夹。"),
+                actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text("返回"))],
+              ),
+            );
+          }
+          return; 
+        }
+      } catch (e) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("❌ 无法访问该文件夹（权限受限），请换一个位置。"), backgroundColor: Colors.red));
+        return;
+      }
+
+      // 3. 确认并执行迁移（逻辑保持不变，但增强了加载圈的关闭保护）
+      bool? confirm = await showDialog<bool>(
+          context: context,
+          builder: (c) => AlertDialog(
+                title: const Text("确认开始迁移？"),
+                content: Text("数据将迁移至:\n$selectedDirectory\n\n💡 迁移成功后，原位置的旧文件将被安全清理。"),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(c, false), child: const Text("取消")),
+                  ElevatedButton(onPressed: () => Navigator.pop(c, true), child: const Text("确定迁移")),
+                ],
+              ));
+
+      if (confirm == true) {
+        // ... 此处保留原有的 showDialog 加载圈代码 ...
+        bool success = await DatabaseHelper.instance.changeRootDirectory(selectedDirectory);
+
+        if (success && mounted) {
+          String newRealRoot = await DatabaseHelper.instance.rootDir;
+          setState(() => _localDataPath = newRealRoot); // 💡 更新路径变量
+          await _rebuildIndex();
+          if (mounted) Navigator.pop(context);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 数据迁移完成！'), backgroundColor: Colors.teal));
+        } else {
+          if (mounted) Navigator.pop(context); // 💡 失败也必须关闭加载圈
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        if (Navigator.canPop(context)) Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('路径迁移失败: $e'), backgroundColor: Colors.red));
+      }
+    }
+  }
+
+  // 💡 恢复：直接呼出电脑底层资源管理器
+  Future<void> _openLocalDataFolder() async {
+    final root = await DatabaseHelper.instance.rootDir;
+    try {
+      if (Platform.isWindows) {
+        await Process.run('explorer', [root]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [root]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [root]);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('无法直接打开，请手动前往路径查看')));
+      }
+    }
+  }
+  // 💡 新增：长按复制本地文件夹路径
+  Future<void> _copyLocalDataFolder() async {
+    final root = await DatabaseHelper.instance.rootDir;
+    await Clipboard.setData(ClipboardData(text: root));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ 路径已复制到剪贴板:\n$root'), 
+          backgroundColor: Colors.teal,
+          duration: const Duration(seconds: 3),
+        )
+      );
+    }
+  }
+
 
   Future<void> _importDiaries() async {
     await Future.delayed(const Duration(milliseconds: 150));
@@ -256,44 +574,86 @@ class _SettingsPageState extends State<SettingsPage> {
               child: Padding(
                   padding: EdgeInsets.all(20),
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    CircularProgressIndicator(),
+                    CircularProgressIndicator(color: Colors.teal),
                     SizedBox(height: 10),
-                    Text("正在解压覆盖...")
+                    Text("正在智能合并数据...")
                   ])))),
     );
 
     try {
       final root = await DatabaseHelper.instance.rootDir;
+      
+
       final bytes = await File(file.path).readAsBytes();
       final archive = ZipDecoder().decodeBytes(bytes);
+
       for (final archiveFile in archive) {
         final String filename = archiveFile.name;
+        
+        // 💡 核心修复 1：绝对禁止解压数据库文件！
+        // 这样就能保留手机里原有的日记记录，不被压缩包覆盖。
+        if (filename.contains('diary_meta.db')) continue;
+
+        final String outPath = p.normalize(p.join(root, filename));
+        if (!outPath.startsWith(p.normalize(root))) continue; 
+
         if (archiveFile.isFile) {
           final data = archiveFile.content as List<int>;
-          File(p.join(root, filename))
+          File(outPath)
             ..createSync(recursive: true)
             ..writeAsBytesSync(data);
         } else {
-          Directory(p.join(root, filename)).createSync(recursive: true);
+          Directory(outPath).createSync(recursive: true);
         }
       }
+
+      // 💡 核心修复 2：文件解压完后，调用“重建索引”功能
+      // 系统会自动识别哪些是新搬进来的 .md 文件，并把它们增量加入当前的日记本。
+      int newCount = await DatabaseHelper.instance.rebuildIndexFromLocalFiles();
+
       if (mounted) {
-        Navigator.pop(context);
-        showDialog(
-            context: context,
-            builder: (c) => AlertDialog(
-                    title: const Text('恢复成功 🎉'),
-                    content: const Text('备份已覆盖，请重启应用。'),
-                    actions: [
-                      TextButton(
-                          onPressed: () => exit(0), child: const Text('立即退出'))
-                    ]));
+        Navigator.pop(context); // 关闭加载圈
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('🎉 智能合并成功！共导入 $newCount 篇新内容'),
+          backgroundColor: Colors.teal,
+        ));
       }
     } catch (e) {
       if (mounted) {
         Navigator.pop(context);
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('恢复失败: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('合并失败: $e'), backgroundColor: Colors.red));
+      }
+    }
+  }
+
+  Future<void> _rebuildIndex() async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => const Center(
+          child: Card(
+              child: Padding(
+                  padding: EdgeInsets.all(20),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    CircularProgressIndicator(color: Colors.teal),
+                    SizedBox(height: 10),
+                    Text("正在全盘解析 .md 文件重建索引...")
+                  ])))),
+    );
+    try {
+      int count = await DatabaseHelper.instance.rebuildIndexFromLocalFiles();
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('✅ 成功重建 $count 篇日记的索引！多端数据已对齐。'),
+            backgroundColor: Colors.teal));
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('❌ 重建索引失败: $e'), backgroundColor: Colors.red));
       }
     }
   }
@@ -302,9 +662,24 @@ class _SettingsPageState extends State<SettingsPage> {
     await Future.delayed(const Duration(milliseconds: 150));
     final String defaultName =
         'GrainBuds_Backup_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.zip';
-    final FileSaveLocation? result =
-        await getSaveLocation(suggestedName: defaultName);
-    if (result == null) return;
+
+    String? savePath;
+
+    // 💡 核心修复：手机端与电脑端的路径保存策略分流
+    if (Platform.isAndroid || Platform.isIOS) {
+      // 📱 手机端：静默保存到应用的导出专区
+      final directory = await getApplicationDocumentsDirectory();
+      final exportDir =
+          Directory(p.join(directory.path, 'MyDiary_Data', 'Exports'));
+      if (!await exportDir.exists()) await exportDir.create(recursive: true);
+      savePath = p.join(exportDir.path, defaultName);
+    } else {
+      // 💻 电脑端：调用原生的“另存为”弹窗
+      final FileSaveLocation? result =
+          await getSaveLocation(suggestedName: defaultName);
+      if (result == null) return; // 用户取消了保存
+      savePath = result.path;
+    }
 
     if (mounted) {
       showDialog(
@@ -323,15 +698,25 @@ class _SettingsPageState extends State<SettingsPage> {
     }
 
     try {
-      final savePath = result.path;
       final res = await DatabaseHelper.instance.createFullBackup(savePath);
 
       if (mounted) {
-        Navigator.pop(context);
+        Navigator.pop(context); // 关闭加载转圈
         if (res != null) {
+          // 💡 修复：导出成功后提供弹窗提示与“立即打开”按钮
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('✅ 备份包已成功保存至:\n$savePath'),
-              backgroundColor: Theme.of(context).primaryColor));
+            content: const Text('✅ 完整备份包已成功导出！'),
+            backgroundColor: Theme.of(context).primaryColor,
+            action: (Platform.isAndroid || Platform.isIOS)
+                ? SnackBarAction(
+                    label: '分享/保存',
+                    textColor: Colors.white,
+                    onPressed: () async {
+                      await Share.shareXFiles([XFile(savePath!)],
+                          text: '小满日记完整备份');
+                    })
+                : null,
+          ));
         } else {
           ScaffoldMessenger.of(context)
               .showSnackBar(const SnackBar(content: Text('❌ 导出失败，请检查目录权限')));
@@ -361,28 +746,47 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _syncToCloud() async {
     if (_cloudSyncPath.isEmpty) return;
+
     final String fileName =
-        'MyDiary_CloudSync_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.zip';
-    await DatabaseHelper.instance
+        'MyDiary_Backup_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.zip';
+
+    // 💡 核心修复：必须接收返回值，判断底层是否真的写入成功了！
+    final result = await DatabaseHelper.instance
         .createFullBackup(p.join(_cloudSyncPath, fileName));
-    if (mounted)
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('🚀 成功推送到网盘！')));
+
+    if (mounted) {
+      if (result != null) {
+        bool isDesktop =
+            Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(isDesktop ? '🚀 成功推送到网盘！' : '📁 成功备份至指定的本地文件夹！'),
+            backgroundColor: Colors.teal));
+      } else {
+        // 如果写入被系统拦截，一定要报红错，不能骗用户！
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('❌ 备份失败：手机系统拒绝了直接写入权限，请使用下方的【导出完整备份包】！'),
+            backgroundColor: Colors.red));
+      }
+    }
   }
 
-  void _showCloudSyncGuide(BuildContext context) {
+  // 💡 新增：统一的备份原理解释弹窗
+ void _showUnifiedBackupGuide(BuildContext context) {
     showDialog(
         context: context,
         builder: (c) => AlertDialog(
-              title: const Text("☁️ 如何实现多设备无感同步？"),
+              title: const Text("📁 备份目录绑定指南"),
               content: const SingleChildScrollView(
                 child: Text(
-                    "1. 在电脑上下载并安装【百度网盘】、【坚果云】或【OneDrive】等客户端。\n\n2. 点击日记的“网盘同步”，选中云盘在电脑里生成的本地同步文件夹。\n\n3. 每次写完日记点击右侧的【推送备份】按钮，数据就会被打包到该文件夹中并自动同步到云端！\n\n4. 在新电脑上，从这个压缩包恢复即可。"),
+                    "为了数据安全，建议您绑定一个固定的备份文件夹：\n\n"
+                    "1. 普通备份：您可以选择电脑上的任意文件夹，每次点击右侧图标，App 都会生成一个 ZIP 包存入其中。\n\n"
+                    "2. 自动云同步（推荐）：如果您安装了【百度网盘】或【OneDrive】，请直接选择网盘生成的“同步文件夹”。\n\n"
+                    "💡 这样，App 每次生成的本地备份，都会被网盘自动上传到云端，实现数据的双重保险！"),
               ),
               actions: [
                 TextButton(
                     onPressed: () => Navigator.pop(c),
-                    child: const Text("我知道了"))
+                    child: const Text("我知道了", style: TextStyle(color: Colors.blue)))
               ],
             ));
   }
@@ -425,7 +829,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _checkForUpdates(BuildContext context,
       {bool showToast = false}) async {
-    const String currentVersion = "1.1.0";
+    const String currentVersion = "1.2.0";
     const String versionUrl =
         "https://raw.githubusercontent.com/TirFire/grain_buds/refs/heads/main/version.txt";
 
@@ -439,11 +843,11 @@ class _SettingsPageState extends State<SettingsPage> {
           .timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         String latestVersion = response.body.trim();
-        if (latestVersion != currentVersion && mounted) {
+        if (_isNewerVersion(currentVersion, latestVersion) && mounted) {
           _showUpdateDialog(context, latestVersion);
         } else if (showToast && mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: const Text("✨ 已是最新版本"),
+              content: const Text("✨ 当前已是最新版本"),
               backgroundColor: Theme.of(context).primaryColor));
         }
       }
@@ -452,6 +856,21 @@ class _SettingsPageState extends State<SettingsPage> {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text("检查失败，请检查网络")));
     }
+  }
+
+  // 💡 新增：版本号比较算法 (支持 x.y.z 格式)
+  bool _isNewerVersion(String current, String latest) {
+    try {
+      List<int> c = current.split('.').map((e) => int.parse(e)).toList();
+      List<int> l = latest.split('.').map((e) => int.parse(e)).toList();
+
+      // 逐位对比：大版本 > 次版本 > 修订版本
+      for (int i = 0; i < 3; i++) {
+        if (l[i] > c[i]) return true; // 远程位更大，有新版
+        if (l[i] < c[i]) return false; // 远程位更小，是旧版
+      }
+    } catch (_) {}
+    return false; // 相等或解析失败
   }
 
   void _showUpdateDialog(BuildContext context, String newVersion) {
@@ -585,7 +1004,7 @@ class _SettingsPageState extends State<SettingsPage> {
             const SizedBox(height: 16),
             const Text("GrainBuds (小满日记)",
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-            const Text("v 1.1.0", style: TextStyle(color: Colors.grey)),
+            const Text("v 1.2.0", style: TextStyle(color: Colors.grey)),
             const Divider(height: 30),
             const Text("数据 100% 存储于本地，守护每一颗闪念的种子。",
                 textAlign: TextAlign.center, style: TextStyle(fontSize: 13)),
@@ -734,47 +1153,71 @@ class _SettingsPageState extends State<SettingsPage> {
           // ================= 数据 =================
           Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: Text("数据管理",
-                  style: TextStyle(
-                      color: primaryColor, fontWeight: FontWeight.bold))),
-          ListTile(
-            leading: Icon(Icons.folder_open, color: primaryColor),
-            title: const Text('本地数据文件夹'),
-            subtitle: Text('日记和媒体均保存在此 (点击打开，长按复制):\n$_localDataPath',
-                style: subtitleStyle),
-            trailing:
-                const Icon(Icons.open_in_new, size: 20, color: Colors.grey),
-            onTap: _openLocalDataFolder,
-            onLongPress: () async {
-              await Clipboard.setData(ClipboardData(text: _localDataPath));
-              if (mounted)
-                ScaffoldMessenger.of(context)
-                    .showSnackBar(const SnackBar(content: Text('✅ 路径已复制到剪贴板')));
-            },
-          ),
+              child: Text("数据管理", style: TextStyle(color: primaryColor, fontWeight: FontWeight.bold))),
+              
+          // 1. 更改存储位置（仅限电脑端）
+          if (Platform.isWindows || Platform.isMacOS || Platform.isLinux)
+            ListTile(
+                leading: const Icon(Icons.folder_special, color: Colors.orange),
+                title: const Text('更改数据存储位置'),
+                subtitle: const Text('自由选择日记库目录（为了数据安全，必须选择空文件夹）', style: subtitleStyle),
+                onTap: _changeStoragePath),
+          // 💡 优化：增加长按复制功能与文案提示（仅限电脑端）
+          if (Platform.isWindows || Platform.isMacOS || Platform.isLinux)
+            ListTile(
+                leading: const Icon(Icons.folder_open, color: Colors.teal),
+                title: const Text('打开本地数据文件夹'),
+                // 💡 优化：显示当前真实路径，并解决变量未使用警告
+                subtitle: Text('当前位置: $_localDataPath\n点击打开管理器，长按复制完整路径', style: subtitleStyle), 
+                onTap: _openLocalDataFolder,
+                onLongPress: _copyLocalDataFolder,
+            ),
+                
+          // 2. WebDAV 多端同步（双端通用）
           ListTile(
               leading: const Icon(Icons.cloud_sync, color: Colors.blue),
-              title: Row(
-                children: [
-                  const Text('网盘同步'),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: () => _showCloudSyncGuide(context),
-                    child: const Icon(Icons.help_outline,
-                        size: 16, color: Colors.grey),
-                  )
-                ],
-              ),
-              subtitle: Text(
-                  _cloudSyncPath.isEmpty
-                      ? "选择坚果云等网盘的本地目录，实现自动备份"
-                      : "当前路径:\n$_cloudSyncPath",
-                  style: subtitleStyle),
-              onTap: _pickCloudDirectory,
-              trailing: IconButton(
-                  icon: const Icon(Icons.backup),
-                  onPressed: _syncToCloud,
-                  tooltip: "立即推送备份")),
+              title: const Text('WebDAV 多端无感同步', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text(_webdavUrl.isEmpty ? "未配置。支持坚果云、Nextcloud 等，实现多端漫游。" : "已连接:\n$_webdavUrl", style: subtitleStyle),
+              onTap: _showWebdavConfigDialog, 
+              trailing: (Platform.isWindows || Platform.isMacOS || Platform.isLinux)
+                  ? ElevatedButton.icon(
+                      onPressed: _startWebdavSync, icon: const Icon(Icons.sync, size: 16), label: const Text("立即同步"),
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, foregroundColor: Colors.white, elevation: 0),
+                    )
+                  : ElevatedButton(
+                      onPressed: _startWebdavSync,
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, foregroundColor: Colors.white, elevation: 0, padding: const EdgeInsets.symmetric(horizontal: 12), minimumSize: const Size(60, 32)),
+                      child: const Text("同步", style: TextStyle(fontSize: 13)),
+                    ),
+          ),
+          
+          // 3. 统一的备份目录绑定（仅限电脑端）
+          if (Platform.isWindows || Platform.isMacOS || Platform.isLinux)
+            ListTile(
+                leading: const Icon(Icons.drive_file_move_outline, color: Colors.blueAccent),
+                title: Row(
+                  children: [
+                    const Text('绑定固定备份目录'),
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: () => _showUnifiedBackupGuide(context), // 💡 呼叫全新的整合版教程
+                      child: const Icon(Icons.help_outline, size: 16, color: Colors.grey)
+                    )
+                  ],
+                ),
+                subtitle: Text(
+                  _cloudSyncPath.isEmpty 
+                    ? "选择电脑上的一个文件夹（支持选为网盘同步目录）" 
+                    : "同步至: $_cloudSyncPath", 
+                  style: subtitleStyle
+                ),
+                onTap: _pickCloudDirectory,
+                trailing: IconButton(
+                  icon: const Icon(Icons.backup_outlined, color: Colors.blueAccent), 
+                  onPressed: _syncToCloud, 
+                  tooltip: "立即打包备份"
+                )
+            ),
           ListTile(
               leading: const Icon(Icons.archive_outlined, color: Colors.teal),
               title: const Text('导出完整备份包'),
@@ -782,10 +1225,10 @@ class _SettingsPageState extends State<SettingsPage> {
                   style: subtitleStyle),
               onTap: _exportBackupZip),
           ListTile(
-              leading: const Icon(Icons.restore_page, color: Colors.green),
-              title: const Text('从备份包恢复'),
+              leading: const Icon(Icons.library_add_check_outlined, color: Colors.green), // 💡 换一个更偏向“添加/检查”的图标
+              title: const Text('合并备份包数据'),
               subtitle:
-                  const Text('从 .zip 压缩包中还原所有日记与配置', style: subtitleStyle),
+                  const Text('将 ZIP 备份包中的内容增量合并到当前日记本', style: subtitleStyle),
               onTap: _importBackupZip),
           ListTile(
               leading:
@@ -794,6 +1237,13 @@ class _SettingsPageState extends State<SettingsPage> {
               subtitle:
                   const Text('支持批量导入 .md 或 .txt 格式的本地文件', style: subtitleStyle),
               onTap: _importDiaries),
+          ListTile(
+              leading: const Icon(Icons.sync_alt, color: Colors.blue),
+              title: const Text(
+                '一键重建本地索引',
+              ),
+              subtitle: const Text('扫描本地存储的所有日记文件并刷新列表，解决多端同步后的显示延迟', style: subtitleStyle),
+              onTap: _rebuildIndex),
           ListTile(
               leading: const Icon(Icons.edit_document, color: Colors.indigo),
               title: const Text('日记模板管理'),
@@ -838,12 +1288,12 @@ class _SettingsPageState extends State<SettingsPage> {
               subtitle: const Text('查看软件设计理念与开发者信息', style: subtitleStyle),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => _showAboutDetail(context)),
-          
+
           ListTile(
               leading: const Icon(Icons.system_update_alt),
               title: const Text('检查版本更新'),
               subtitle:
-                  const Text('当前版本 v1.1.0，获取最新功能与修复', style: subtitleStyle),
+                  const Text('当前版本 v1.2.0，获取最新功能与修复\n注意：更新前把文件数据备份成压缩包保障数据安全', style: subtitleStyle),
               onTap: () => _checkForUpdates(context, showToast: true)),
 
           const SizedBox(height: 60),

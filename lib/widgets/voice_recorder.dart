@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import 'package:permission_handler/permission_handler.dart';
+import 'dart:io';
 
 class VoiceRecorderDialog extends StatefulWidget {
   final Function(String) onRecordComplete;
@@ -29,9 +31,46 @@ class _VoiceRecorderDialogState extends State<VoiceRecorderDialog> {
   // 💡 开始录音
   Future<void> _start() async {
     try {
+      // 💡 场景触发：点击了圆形的录音按钮时，才去按需申请麦克风权限
+      if (Platform.isAndroid || Platform.isIOS) {
+        final status = await Permission.microphone.status;
+        
+        // 优雅处理：如果用户以前彻底拒绝过，温柔地引导去设置页
+        if (status.isPermanentlyDenied) {
+          if (mounted) {
+            showDialog(
+              context: context,
+              builder: (c) => AlertDialog(
+                title: const Text('缺少麦克风权限'),
+                content: const Text('您之前已永久拒绝了麦克风权限，无法录音。请前往系统设置中手动开启。'),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(c), child: const Text('取消', style: TextStyle(color: Colors.grey))),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white),
+                    onPressed: () {
+                      Navigator.pop(c);
+                      openAppSettings(); // 💡 跳转系统应用详情页
+                    },
+                    child: const Text('去设置'),
+                  )
+                ],
+              ),
+            );
+          }
+          return;
+        }
+        
+        // 正常按需申请：如果还没授权，弹出系统授权框
+        if (!status.isGranted) {
+          final result = await Permission.microphone.request();
+          if (!result.isGranted) return; // 用户如果点了拒绝，直接返回，不触发录音
+        }
+      }
+
+      // _audioRecorder.hasPermission() 作为二次安全校验（同时兼容保障了桌面端不受影响）
       if (await _audioRecorder.hasPermission()) {
         // 💡 修复：改用系统的临时缓存文件夹存储生肉录音，拒绝污染用户的文档区
-        final tempDir = await getTemporaryDirectory(); 
+        final tempDir = await getTemporaryDirectory();
         final path = p.join(tempDir.path, 'REC_${DateTime.now().millisecondsSinceEpoch}.m4a');
 
         const config = RecordConfig(); // 默认高保真配置

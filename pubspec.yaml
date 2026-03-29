@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 1.0.0+3
 
 environment:
   sdk: ">=3.1.0 <4.0.0"  
@@ -41,11 +41,12 @@ dependencies:
   file_selector: ^1.1.0
   media_kit: any
   media_kit_video: any
-  media_kit_libs_video: any
+  media_kit_libs_android_video: ^1.3.0
+  media_kit_libs_windows_video: ^1.0.11
   table_calendar: ^3.2.0
   intl: ^0.20.2
   flutter_markdown: ^0.7.7+1
-  shared_preferences: ^2.5.4
+  shared_preferences: ^2.5.5
   pdf: ^3.12.0
   printing: ^5.14.3
   crypto: ^3.0.7
@@ -66,6 +67,10 @@ dependencies:
   http: ^1.6.0
   url_launcher: ^6.2.0
   window_manager: ^0.5.1
+  permission_handler: ^12.0.1
+  webdav_client: ^1.2.2
+  image_picker: ^1.2.1
+  flutter_native_splash: ^2.4.1
 
 dev_dependencies:
   flutter_test:
@@ -90,6 +95,8 @@ flutter:
 
   assets:
     - assets/images/donate_qr.png
+    - assets/fonts/NotoSansSC-Regular.ttf
+    - assets/fonts/NotoSansSC-Bold.ttf
 
 
   # To add assets to your application, add an assets section, like this:
@@ -130,4 +137,29 @@ flutter_launcher_icons:
     generate: true
     icon_size: 48
   image_path: "assets/icon.png"
+
+flutter_native_splash:
+  # ================= 全局基础配置 =================
+  # 浅色模式背景
+  color: "#FFFFFF"
+  # 深色模式背景
+  color_dark: "#121212"
+  
+  # 居中展示的 Logo
+  image: assets/icon.png
+  # 如果你的 icon 在深色背景下看不清，可以单独准备一个反色 icon 放在这里：
+  # image_dark: assets/icon_dark.png
+
+  # 启用的平台
+  android: true
+  ios: true
+  web: false
+
+  # ================= Android 12+ 专属配置 =================
+  android_12:
+    image: assets/icon.png
+    # image_dark: assets/icon_dark.png
+    color: "#FFFFFF"
+    # 💡 核心修复：必须在这里也加上深色背景，防止最新安卓系统深夜白屏刺眼！
+    color_dark: "#121212"
   

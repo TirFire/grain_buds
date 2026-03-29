@@ -62,7 +62,7 @@ class _TemplateMgrPageState extends State<TemplateMgrPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("日记模板管理"), backgroundColor: Colors.teal, foregroundColor: Colors.white),
+      appBar: AppBar(title: const Text("日记模板管理"), backgroundColor: Theme.of(context).primaryColor, foregroundColor: Colors.white),
       body: ListView.builder(
         itemCount: _templates.length,
         itemBuilder: (context, index) {
@@ -70,7 +70,7 @@ class _TemplateMgrPageState extends State<TemplateMgrPage> {
           return Card(
             margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: ListTile(
-              leading: const Icon(Icons.copy_all, color: Colors.teal),
+              leading: Icon(Icons.copy_all, color: Theme.of(context).primaryColor),
               title: Text(t['name']),
               subtitle: Text(t['title_tpl'], maxLines: 1, overflow: TextOverflow.ellipsis),
               trailing: Row(

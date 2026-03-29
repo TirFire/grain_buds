@@ -3,7 +3,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 // 💡 确保你在终端运行了: flutter pub add flutter_heatmap_calendar
 import 'package:flutter_heatmap_calendar/flutter_heatmap_calendar.dart';
-
+import '../widgets/diary_card.dart'; // 💡 新增：用于显示日记卡片
 import '../core/database_helper.dart'; 
 import 'summary_page.dart'; 
 
@@ -100,6 +100,74 @@ class _StatsPageState extends State<StatsPage> {
     }
   }
 
+  // 💡 新增：点击热力图弹出当日日记列表
+  void _showDayDiariesDialog(DateTime date) async {
+    final String dateStr = DateFormat('yyyy-MM-dd').format(date);
+    
+    // 从数据库获取全部日记并过滤出该日期的
+    final allDiaries = await DatabaseHelper.instance.getAllDiaries();
+    final dayDiaries = allDiaries.where((d) => 
+      (d['date'] as String).startsWith(dateStr)
+    ).toList();
+
+    if (!mounted) return;
+
+    if (dayDiaries.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("$dateStr 这一天没有留下记录哦 ~"))
+      );
+      return;
+    }
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        height: MediaQuery.of(context).size.height * 0.7,
+        decoration: BoxDecoration(
+          color: Theme.of(context).scaffoldBackgroundColor,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            const SizedBox(height: 12),
+            Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.withOpacity(0.3), borderRadius: BorderRadius.circular(2))),
+            Padding(
+              padding: const EdgeInsets.all(20),
+              child: Row(
+                children: [
+                  const Icon(Icons.calendar_today, size: 18, color: Colors.teal),
+                  const SizedBox(width: 10),
+                  Text("$dateStr 的记录印记", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  const Spacer(),
+                  Text("${dayDiaries.length} 篇", style: const TextStyle(color: Colors.grey)),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.only(bottom: 30),
+                itemCount: dayDiaries.length,
+                itemBuilder: (context, index) {
+                  return DiaryCard(
+                    diary: dayDiaries[index],
+                    onRefresh: () {
+                      Navigator.pop(context);
+                      _calculateStats(); // 刷新统计数据
+                    },
+                    heroTagPrefix: 'stats_click_',
+                    showDate: true, // 💡 按照你的要求，日历相关的卡片显示日期
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final primaryColor = Theme.of(context).primaryColor;
@@ -159,11 +227,7 @@ class _StatsPageState extends State<StatsPage> {
                           colorsets: const {
                             1: Colors.teal, // 基础颜色，写得越多会自动加深
                           },
-                          onClick: (value) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text(DateFormat('yyyy年MM月dd日').format(value) + " 的记录印记"))
-                            );
-                          },
+                          onClick: (value) => _showDayDiariesDialog(value),
                         ),
                       ],
                     ),
@@ -231,10 +295,12 @@ class _StatsPageState extends State<StatsPage> {
               const SizedBox(height: 4),
               Text(value, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             ],
+            
           ),
         ),
       ),
     );
+    
   }
 
   List<BarChartGroupData> _buildBarGroups(Color color) {
