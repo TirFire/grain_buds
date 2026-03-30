@@ -146,7 +146,7 @@ flutter_native_splash:
   color_dark: "#121212"
   
   # 居中展示的 Logo
-  image: assets/icon.png
+  image: assets/images/start.png
   # 如果你的 icon 在深色背景下看不清，可以单独准备一个反色 icon 放在这里：
   # image_dark: assets/icon_dark.png
 
@@ -157,7 +157,7 @@ flutter_native_splash:
 
   # ================= Android 12+ 专属配置 =================
   android_12:
-    image: assets/icon.png
+    image: assets/images/start.png
     # image_dark: assets/icon_dark.png
     color: "#FFFFFF"
     # 💡 核心修复：必须在这里也加上深色背景，防止最新安卓系统深夜白屏刺眼！
