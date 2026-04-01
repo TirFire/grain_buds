@@ -25,6 +25,8 @@ import '../widgets/custom_title_bar.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../core/webdav_sync_service.dart';
 import 'package:image_picker/image_picker.dart';
+import '../core/markdown_controller.dart';
+import '../core/ai_service.dart';
 
 
 
@@ -53,9 +55,15 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
   bool _isUnknownDate = false; //新增：标记是否为不可考的回忆
   bool _canPop = false;
   bool _isSaving = false;
+  bool _isFirstSession = false; // 💡 标记是否为首次创建的会话
+  String _sessionStartTime = ""; // 💡 记录首次会话的起始时间
+  bool _hasRealChanges = false; // 💡 标记是否有实质性改动
+  bool _showTextFormatBar = false;
+  bool _isAILoading = false;
+  String _aiLoadingText = "🪄 小满正在整理...";
 
   final titleController = TextEditingController();
-  final contentController = TextEditingController();
+  final contentController = MarkdownTextEditingController();
   final FocusNode _contentFocusNode = FocusNode();
   final tagsController = TextEditingController();
 
@@ -151,6 +159,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                   setState(() {
                     _creationDate = newDate.toString();
                     _isUnknownDate = false;
+                    _hasRealChanges = true;
                   });
                   _performAutoSave();
                 }
@@ -163,7 +172,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                   style: TextStyle(fontSize: 12)),
               onTap: () {
                 Navigator.pop(c);
-                setState(() => _isUnknownDate = !_isUnknownDate);
+                setState(() { _isUnknownDate = !_isUnknownDate; _hasRealChanges = true; });
                 _performAutoSave();
               },
             ),
@@ -171,6 +180,15 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
         ),
       ),
     );
+  }
+
+  
+
+  // 💡 智能决策修改时间
+  String get _determinedUpdateTime {
+    if (_isFirstSession) return _sessionStartTime; // 新建日记：整个初次编辑过程锁定更新时间！
+    if (_hasRealChanges) return DateTime.now().toString(); // 已有日记且真正改动了内容：更新为现在
+    return widget.existingDiary?['update_time']?.toString() ?? _creationDate; // 没改动内容：保持原有的修改时间
   }
 
   bool _handleKeyEvent(KeyEvent event) {
@@ -223,7 +241,10 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
           final savedPath = p.join(
               assetDir, 'PASTE_${DateTime.now().millisecondsSinceEpoch}.png');
           await File(savedPath).writeAsBytes(imageBytes);
-          setState(() => _imagePaths.add(savedPath));
+          setState(() {
+            _imagePaths.add(savedPath);
+            _hasRealChanges = true; // 💡 补上这行
+          });
           await _performAutoSave();
           hasPasted = true;
         }
@@ -241,6 +262,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
     }
   }
 
+  
   
     void _initData() {
     if (widget.pwdKey != null) {
@@ -327,43 +349,87 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
       } else {
         _creationDate = DateTime.now().toString();
       }
+      _isFirstSession = true; 
+      _sessionStartTime = _creationDate; // 💡 将首次会话的初始时间与创建时间强绑定
     }
     _fixMediaPaths();
   }
   // ====================================================================
   // 💡 新增：专门解决模拟器重启/重装App导致的“沙盒路径漂移”问题
   // ====================================================================
-  Future<void> _fixMediaPaths() async {
-    // 获取当前应用最新的、真实的沙盒根目录
-    final appDir = await getApplicationDocumentsDirectory();
-    final rootPath = appDir.path;
+  // lib/pages/edit_page.dart
 
-    // 修复逻辑：掐头去尾，只替换系统前缀，保留 MyDiary_Data 及后面的真实路径
-    void repair(List<String> paths) {
-      for (int i = 0; i < paths.length; i++) {
-        int idx = paths[i].indexOf('MyDiary_Data');
-        if (idx != -1) {
-          // 将最新的 rootPath 与后半截真实路径拼接起来
-          paths[i] = p.join(rootPath, paths[i].substring(idx));
-        }
+Future<void> _fixMediaPaths() async {
+  final appDir = await getApplicationDocumentsDirectory();
+  final rootPath = appDir.path; // 注意：这里改用沙盒根目录，不再包含 MyDiary_Data
+
+  void repair(List<String> paths) {
+    for (int i = 0; i < paths.length; i++) {
+      // 寻找 MyDiary_Data 标志
+      int idx = paths[i].indexOf('MyDiary_Data');
+      if (idx != -1) {
+        // 💡 修复重点：直接将最新的沙盒根路径与相对于沙盒的路径拼接
+        // 不要重复包含 MyDiary_Data 文件夹
+        paths[i] = p.join(rootPath, paths[i].substring(idx));
       }
-    }
-
-    // 触发 UI 刷新，让照片瞬间“复活”
-    if (mounted) {
-      setState(() {
-        repair(_imagePaths);
-        repair(_videoPaths);
-        repair(_audioPaths);
-        repair(_attachments);
-      });
-      // 顺手保存一下，把数据库里的旧路径洗刷成最新的
-      _performAutoSave(); 
     }
   }
 
+  if (mounted) {
+    setState(() {
+      repair(_imagePaths);
+      repair(_videoPaths);
+      repair(_audioPaths);
+      repair(_attachments);
+    });
+    // 💡 只有在路径真的发生变化时才触发自动保存，或者直接去掉这里的强制保存
+    // 因为 _onDataChanged 稍后会处理
+  }
+}
+
+  // 💡 智能格式覆盖 (剥洋葱机制)
+  void _insertMarkdown(String prefix, {String suffix = ''}) {
+    if (_isArchived) return;
+
+    final text = contentController.text;
+    final selection = contentController.selection;
+
+    int start = selection.isValid ? selection.start : text.length;
+    int end = selection.isValid ? selection.end : text.length;
+
+    if (start == -1) {
+      start = text.length;
+      end = text.length;
+    }
+
+    String selectedText = text.substring(start, end);
+
+    if (selectedText.isNotEmpty) {
+      selectedText = selectedText
+          .replaceAll(RegExp(r'^\*\*|\*\*$'), '')
+          .replaceAll(RegExp(r'^\*|\*$'), '')
+          .replaceAll(RegExp(r'^~~|~~$'), '')
+          .replaceAll(RegExp(r'^`|`$'), '')
+          .replaceAll(RegExp(r'^#{1,6}\s+'), '') // 💡 剥离旧的标题标记
+          .replaceAll(RegExp(r'^\[(red|blue|green|orange|purple)\]|\[/\]$'), '')
+          .replaceAll(RegExp(r'^<font color=".*?">|</font>$'), '')
+          .replaceAll(RegExp(r'^\[bg_(yellow|red|green|blue|purple)\]|\[/bg\]$'), '');
+    }
+
+    final newText = text.replaceRange(start, end, '$prefix$selectedText$suffix');
+
+    contentController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: start + prefix.length + selectedText.length),
+    );
+
+    setState(() => _hasRealChanges = true);
+    _performAutoSave(); 
+  }
+  
   void _onDataChanged() {
     _updateWordCount();
+    _hasRealChanges = true;
     if (_debounceTimer?.isActive ?? false) _debounceTimer!.cancel();
     setState(() => _saveStatusText = "正在输入...");
     _debounceTimer =
@@ -416,6 +482,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
         'pwd_hash': _pwdHash, 
         'location': _location,
         'type': widget.existingDiary?['type'] ?? widget.entryType,
+        'update_time': _determinedUpdateTime,
       };
 
       if (_currentDiaryId == null) {
@@ -436,6 +503,84 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
     } finally {
       _isSaving = false; // 🔓 解锁
     }
+  }
+
+  // 💡 新增：排版快捷工具栏
+  Widget _buildTextFormatBar() {
+    if (_isArchived) return const SizedBox.shrink();
+
+    return Container(
+      height: 40,
+      color: Theme.of(context).cardColor,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          children: [
+            IconButton(icon: const Icon(Icons.format_bold, size: 20, color: Colors.blueGrey), onPressed: () => _insertMarkdown('**', suffix: '**'), tooltip: '加粗'),
+            IconButton(icon: const Icon(Icons.format_italic, size: 20, color: Colors.blueGrey), onPressed: () => _insertMarkdown('*', suffix: '*'), tooltip: '斜体'),
+            IconButton(icon: const Icon(Icons.format_strikethrough, size: 20, color: Colors.blueGrey), onPressed: () => _insertMarkdown('~~', suffix: '~~'), tooltip: '删除线'),
+            
+            const VerticalDivider(indent: 10, endIndent: 10, width: 20, color: Colors.black12),
+            
+            // 💡 1. 标题等级选择器
+            PopupMenuButton<String>(
+              tooltip: '选择标题等级',
+              icon: const Icon(Icons.format_size, size: 20, color: Colors.blueGrey),
+              onSelected: (value) => _insertMarkdown(value),
+              itemBuilder: (context) => [
+                const PopupMenuItem(value: '# ', child: Text('一级大标题', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+                const PopupMenuItem(value: '## ', child: Text('二级中标题', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
+                const PopupMenuItem(value: '### ', child: Text('三级小标题', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold))),
+              ],
+            ),
+
+            IconButton(icon: const Icon(Icons.format_quote, size: 20, color: Colors.blueGrey), onPressed: () => _insertMarkdown('> '), tooltip: '段落引用'),
+            IconButton(icon: const Icon(Icons.format_list_bulleted, size: 20, color: Colors.blueGrey), onPressed: () => _insertMarkdown('- '), tooltip: '无序列表'),
+            
+            const VerticalDivider(indent: 10, endIndent: 10, width: 20, color: Colors.black12),
+            
+            // 💡 2. 文本颜色选择 (替换为下拉菜单！)
+            PopupMenuButton<String>(
+              tooltip: '文本颜色',
+              onSelected: (value) => _insertMarkdown('[$value]', suffix: '[/]'),
+              itemBuilder: (context) => [
+                PopupMenuItem(value: 'red', child: Row(children: [Icon(Icons.circle, color: Colors.redAccent), const SizedBox(width:8), const Text('红色')])),
+                PopupMenuItem(value: 'blue', child: Row(children: [Icon(Icons.circle, color: Colors.blue), const SizedBox(width:8), const Text('蓝色')])),
+                PopupMenuItem(value: 'green', child: Row(children: [Icon(Icons.circle, color: Colors.teal), const SizedBox(width:8), const Text('绿色')])),
+                PopupMenuItem(value: 'orange', child: Row(children: [Icon(Icons.circle, color: Colors.orange), const SizedBox(width:8), const Text('橙色')])),
+                PopupMenuItem(value: 'purple', child: Row(children: [Icon(Icons.circle, color: Colors.purpleAccent), const SizedBox(width:8), const Text('紫色')])),
+              ],
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 4.0),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.palette_outlined, size: 18, color: Colors.blueAccent),
+                    Icon(Icons.arrow_drop_down, size: 18, color: Colors.blueAccent),
+                  ],
+                ),
+              ),
+            ),
+            
+            const VerticalDivider(indent: 10, endIndent: 10, width: 20, color: Colors.black12),
+
+            // 💡 3. 背景高亮选择器
+            PopupMenuButton<String>(
+              tooltip: '文本背景高亮',
+              icon: const Icon(Icons.border_color, size: 18, color: Colors.amber), // 荧光笔图标
+              onSelected: (value) => _insertMarkdown('[bg_$value]', suffix: '[/bg]'),
+              itemBuilder: (context) => [
+                PopupMenuItem(value: 'yellow', child: Row(children: [Icon(Icons.circle, color: Colors.yellow.shade300), const SizedBox(width:8), const Text('经典黄')])),
+                PopupMenuItem(value: 'red', child: Row(children: [Icon(Icons.circle, color: Colors.red.shade200), const SizedBox(width:8), const Text('柔和红')])),
+                PopupMenuItem(value: 'green', child: Row(children: [Icon(Icons.circle, color: Colors.teal.shade200), const SizedBox(width:8), const Text('清爽绿')])),
+                PopupMenuItem(value: 'blue', child: Row(children: [Icon(Icons.circle, color: Colors.blue.shade200), const SizedBox(width:8), const Text('天空蓝')])),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
   
   void _showTemplatePicker() {
@@ -570,11 +715,19 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
     return dir.path;
   }
 
-  // 💡 修复 2：将媒体文件直接写入 assets 文件夹，拒绝 Documents 污染
   Future<void> _saveMediaFile(String originalPath, String type) async {
     final assetDir = await _getAssetDir();
-    final savedPath = p.join(assetDir,
-        '${DateTime.now().millisecondsSinceEpoch}_${p.basename(originalPath)}');
+    
+    // 💡 修复 4：直接在一开始就把名字命名为规范的“日期开头”格式
+    final date = DateTime.parse(_isUnknownDate ? "1900-01-01 00:00:00" : _creationDate);
+    String datePrefix = date.toString().substring(0, 10);
+    // 过滤掉原名里可能导致系统崩溃的特殊符号
+    String safeBaseName = p.basename(originalPath).replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+    
+    // 生成标准唯一的文件名 (如：2026-03-31_16480000_photo.jpg)
+    String newName = "${datePrefix}_${DateTime.now().millisecondsSinceEpoch}_$safeBaseName";
+    
+    final savedPath = p.join(assetDir, newName);
     
     // 1. 先安全地将原文件拷贝到日记的沙盒文件夹中
     await File(originalPath).copy(savedPath);
@@ -582,8 +735,6 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
     // ================== 🧹 智能垃圾清理机制 ==================
     try {
       final tempDir = await getTemporaryDirectory();
-      // 💡 核心保护：使用 p.isWithin 判断该文件是否位于系统的“临时/缓存目录”下
-      // 这样既能清理掉录音、拍照产生的临时垃圾，又能绝对保护用户从电脑桌面拖进来的原文件不被误删！
       if (p.isWithin(tempDir.path, originalPath)) {
         await File(originalPath).delete();
         debugPrint("🗑️ 成功清理临时垃圾文件: $originalPath");
@@ -594,7 +745,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
     // ========================================================
 
     setState(() {
-      // 💡 升级 2：使用 .add() 把新文件追加到列表中，不再互相覆盖！
+      _hasRealChanges = true;
       if (type == 'video' || type == 'live') {
         _videoPaths.add(savedPath);
       } else if (type == 'audio') {
@@ -687,7 +838,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
               "未知城市";
           String suburb = address['suburb'] ?? address['neighbourhood'] ?? "";
           setState(() {
-            _location = suburb.isNotEmpty ? "$city · $suburb" : city;
+            _location = suburb.isNotEmpty ? "$city · $suburb" : city;_hasRealChanges = true;
           });
           await _performAutoSave();
           return;
@@ -714,6 +865,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
           final district = data['data']['district'] ?? '';
 
           setState(() {
+            _hasRealChanges = true;
             if (district.isNotEmpty && district != city) {
               _location = "$city · $district";
             } else {
@@ -737,6 +889,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
         final data = jsonDecode(ipResponse.body);
         if (data['status'] == 'success') {
           setState(() {
+            _hasRealChanges = true;
             _location = "${data['regionName']} ${data['city']}";
           });
           await _performAutoSave();
@@ -782,7 +935,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                     title: const Text("清除位置信息"),
                     onTap: () {
                       setState(() {
-                        _location = null;
+                        _location = null;_hasRealChanges = true;
                       });
                       _performAutoSave();
                       Navigator.pop(c);
@@ -815,7 +968,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                       onPressed: () {
                         if (ctrl.text.trim().isNotEmpty) {
                           setState(() {
-                            _location = ctrl.text.trim();
+                            _location = ctrl.text.trim();_hasRealChanges = true;
                           });
                           _performAutoSave();
                         }
@@ -846,7 +999,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
 
   @override
   Widget build(BuildContext context) {
-    // 💡 判断平台，用于加载不同的 UI 逻辑。kIsWeb 用于处理网页端
+    // 💡 判断平台，用于加载不同的 UI 逻辑
     final bool isDesktop = !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
 
     // =========================================================
@@ -862,56 +1015,63 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
           if (context.mounted) Future.microtask(() => Navigator.pop(context, true));
           _triggerSilentSync();
         },
-        child: DropTarget(
-          onDragEntered: (_) => setState(() => _isDragging = true),
-          onDragExited: (_) => setState(() => _isDragging = false),
-          onDragDone: (details) async {
-            setState(() { _isDragging = false; });
-            for (var xfile in details.files) {
-              String ext = p.extension(xfile.path).toLowerCase();
-              _saveMediaFile(xfile.path, ext == '.mp4' ? 'video' : (['.mp3', '.m4a'].contains(ext) ? 'audio' : 'image'));
-            }
-          },
-          child: Scaffold(
-            appBar: CustomTitleBar(
-              backgroundColor: _isDragging ? Colors.orange : (_isLocked ? Colors.indigo : Theme.of(context).primaryColor),
-              leading: IconButton(
-                icon: const Icon(Icons.arrow_back, color: Colors.white),
-                onPressed: () async { await _performSaveAndPop(); },
-              ),
-              title: Text(_getAppBarTitle(), style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-            ) as PreferredSizeWidget,
-            body: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Column(
-                children: [
-                  const SizedBox(height: 16),
-                  // 💡 调用全新的专属方法
-                  _buildWindowsHeader(),
-                  Expanded(child: _buildEditor()),
-                  
-                  // 媒体展示区（如有）
-                  if (_videoPaths.isNotEmpty || _imagePaths.isNotEmpty || _audioPaths.isNotEmpty || _attachments.isNotEmpty)
-                    Container(
-                      constraints: const BoxConstraints(maxHeight: 220),
-                      margin: const EdgeInsets.only(top: 10, bottom: 10),
-                      child: SingleChildScrollView(child: _buildMediaDisplay()),
-                    ),
-                  
-                  if (!_isArchived) const Divider(height: 1, color: Colors.black12),
-                  // 💡 调用全新的专属方法
-                  _buildWindowsToolbar(),
-                  _buildWindowsFooter(),
-                ],
+        // 💡 修改 1：用 Stack 包裹原本的 DropTarget
+        child: Stack(
+          children: [
+            DropTarget(
+              onDragEntered: (_) => setState(() => _isDragging = true),
+              onDragExited: (_) => setState(() => _isDragging = false),
+              onDragDone: (details) async {
+                setState(() { _isDragging = false; });
+                for (var xfile in details.files) {
+                  String ext = p.extension(xfile.path).toLowerCase();
+                  _saveMediaFile(xfile.path, ext == '.mp4' ? 'video' : (['.mp3', '.m4a'].contains(ext) ? 'audio' : 'image'));
+                }
+              },
+              child: Scaffold(
+                appBar: CustomTitleBar(
+                  backgroundColor: _isDragging ? Colors.orange : (_isLocked ? Colors.indigo : Theme.of(context).primaryColor),
+                  leading: IconButton(
+                    icon: const Icon(Icons.arrow_back, color: Colors.white),
+                    onPressed: () async { await _performSaveAndPop(); },
+                  ),
+                  title: Text(_getAppBarTitle(), style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                ) as PreferredSizeWidget,
+                body: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 16),
+                      _buildWindowsHeader(),
+                      Expanded(child: _buildEditor()),
+                      
+                      if (_videoPaths.isNotEmpty || _imagePaths.isNotEmpty || _audioPaths.isNotEmpty || _attachments.isNotEmpty)
+                        Container(
+                          constraints: const BoxConstraints(maxHeight: 220),
+                          margin: const EdgeInsets.only(top: 10, bottom: 10),
+                          child: SingleChildScrollView(child: _buildMediaDisplay()),
+                        ),
+                      
+                      if (!_isArchived) const Divider(height: 1, color: Colors.black12),
+                      _buildTextFormatBar(), 
+                      const Divider(height: 1, color: Colors.black12),
+
+                      _buildWindowsToolbar(),
+                      _buildWindowsFooter(),
+                    ],
+                  ),
+                ),
               ),
             ),
-          ),
+            // 💡 电脑端 AI 遮罩
+            if (_isAILoading) _buildAILoadingOverlay(),
+          ],
         ),
       );
     }
 
     // =========================================================
-    // 💡 B. 手机端：继续保持极致的沉浸输入与键盘防遮挡（保持不变）
+    // 💡 B. 手机端：继续保持极致的沉浸输入与键盘防遮挡
     // =========================================================
     final bool isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
 
@@ -924,44 +1084,86 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
         if (context.mounted) Future.microtask(() => Navigator.pop(context, true));
         _triggerSilentSync();
       },
-      child: Scaffold(
-        backgroundColor: Colors.white,
-        appBar: AppBar(
-          backgroundColor: Theme.of(context).primaryColor,
-          foregroundColor: Colors.white,
-          title: Text(_getAppBarTitle(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-        ),
-        body: GestureDetector(
-          onTap: () => FocusScope.of(context).unfocus(),
-          behavior: HitTestBehavior.translucent,
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Column(
-                  children: [
-                    const SizedBox(height: 16),
-                    _buildHeader(), // 手机端继续使用这个受污染的 Header，无须调整
-                    const Divider(),
+      // 💡 修改 2：用 Stack 包裹原本的 Scaffold
+      child: Stack(
+        children: [
+          Scaffold(
+            backgroundColor: Colors.white,
+            appBar: AppBar(
+              backgroundColor: Theme.of(context).primaryColor,
+              foregroundColor: Colors.white,
+              title: Text(_getAppBarTitle(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            ),
+            body: GestureDetector(
+              onTap: () => FocusScope.of(context).unfocus(),
+              behavior: HitTestBehavior.translucent,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Column(
+                      children: [
+                        const SizedBox(height: 16),
+                        _buildHeader(),
+                        const Divider(),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: _buildEditor(),
+                    ),
+                  ),
+                  if (!isKeyboardOpen && (_videoPaths.isNotEmpty || _imagePaths.isNotEmpty || _audioPaths.isNotEmpty || _attachments.isNotEmpty))
+                    Container(
+                      constraints: const BoxConstraints(maxHeight: 150),
+                      margin: const EdgeInsets.only(top: 5, bottom: 5),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: SingleChildScrollView(child: _buildMediaDisplay()),
+                    ),
+                  
+                  if (!isDesktop && _showTextFormatBar) ...[
+                    _buildTextFormatBar(),
+                    const Divider(height: 1, color: Colors.black12),
                   ],
-                ),
+                  
+                  _buildToolbar(),
+                  if (!_isArchived && !isKeyboardOpen) const Divider(height: 1, color: Colors.black12),
+                  if (!isKeyboardOpen) _buildFooter(),
+                ],
               ),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: _buildEditor(),
-                ),
+            ),
+          ),
+          // 💡 手机端 AI 遮罩
+          if (_isAILoading) _buildAILoadingOverlay(),
+        ],
+      ),
+    );
+  }
+
+  // =======================================================
+  // 💡 全局 AI 施法遮罩 UI
+  // =======================================================
+  Widget _buildAILoadingOverlay() {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black.withOpacity(0.6), 
+        child: Center( // 💡 移除了这里的 const
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(color: Colors.amber), // 补上精确的 const
+              const SizedBox(height: 20), // 补上精确的 const
+              Text(
+                _aiLoadingText, // 这是一个变量，所以它外面不能有 const
+                style: const TextStyle(
+                  color: Colors.white, 
+                  fontSize: 16, 
+                  decoration: TextDecoration.none, 
+                  fontWeight: FontWeight.bold
+                )
               ),
-              if (!isKeyboardOpen && (_videoPaths.isNotEmpty || _imagePaths.isNotEmpty || _audioPaths.isNotEmpty || _attachments.isNotEmpty))
-                Container(
-                  constraints: const BoxConstraints(maxHeight: 150),
-                  margin: const EdgeInsets.only(top: 5, bottom: 5),
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: SingleChildScrollView(child: _buildMediaDisplay()),
-                ),
-              _buildToolbar(),
-              if (!_isArchived && !isKeyboardOpen) const Divider(height: 1, color: Colors.black12),
-              if (!isKeyboardOpen) _buildFooter(),
             ],
           ),
         ),
@@ -1112,6 +1314,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                   );
                 }),
             IconButton(icon: const Icon(Icons.attach_file_outlined, color: Colors.teal), tooltip: '添加附件', onPressed: () => _pickMedia('file')),
+            IconButton(icon: const Icon(Icons.auto_awesome, color: Colors.deepPurpleAccent), tooltip: 'AI 写作魔法', onPressed: _showAIAssistantMenu),
           ]
         ));
   }
@@ -1240,7 +1443,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                     .toList(),
                 onChanged: _isArchived ? null : (v) {
                   if (v != null) {
-                    setState(() => _selectedWeatherKey = v);
+                    setState(() { _selectedWeatherKey = v; _hasRealChanges = true; }); // 💡 天气加上
                     _performAutoSave();
                   }
                 }),
@@ -1255,7 +1458,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                     .toList(),
                 onChanged: _isArchived ? null : (v) {
                   if (v != null) {
-                    setState(() => _selectedMoodKey = v);
+                    setState(() { _selectedMoodKey = v; _hasRealChanges = true; }); // 💡 心情加上
                     _performAutoSave();
                   }
                 }),
@@ -1300,7 +1503,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
               initialValue: _selectedWeatherKey,
               enabled: !_isArchived,
               onSelected: (v) {
-                setState(() => _selectedWeatherKey = v);
+                setState(() { _selectedWeatherKey = v; _hasRealChanges = true; }); // 💡 天气加上
                 _performAutoSave();
               },
               itemBuilder: (c) => AppConstants.weatherMap.entries
@@ -1318,7 +1521,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
               initialValue: _selectedMoodKey,
               enabled: !_isArchived,
               onSelected: (v) {
-                setState(() => _selectedMoodKey = v);
+                setState(() { _selectedMoodKey = v; _hasRealChanges = true; }); // 💡 心情加上
                 _performAutoSave();
               },
               itemBuilder: (c) => AppConstants.moodMap.entries
@@ -1384,20 +1587,14 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
   Widget _buildToolbar() {
     if (_isArchived) return const SizedBox.shrink();
     
-    // 💡 实时判断平台：手机端独享“退出键盘”图标，Windows 不变
     bool isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
     
     return Container(
         color: Theme.of(context).cardColor,
-        // 💡 保持 vertical padding 压缩高度
         padding: const EdgeInsets.symmetric(vertical: 4), 
         child: Row(
-          // 💡 关键 1：电脑端靠左，手机端全宽均匀分布
           mainAxisAlignment: isDesktop ? MainAxisAlignment.start : MainAxisAlignment.spaceEvenly, 
           children: [
-            // ============================================
-            // 💡 A. 只有电脑端才在这里显示字数（保持原样）
-            // ============================================
             if (isDesktop) ...[
               Padding(
                 padding: const EdgeInsets.only(left: 12.0, right: 8.0),
@@ -1410,16 +1607,27 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                   ],
                 ),
               ),
-              const Spacer(), // 顶开右侧按钮
+              const Spacer(), 
             ],
             
-            // ============================================
-            // B. 多媒体按钮组 (双端通用)
-            // ============================================
-            // 💡 这些按钮在手机端会被 spaceEvenly 完美拉开，全宽均匀分布
+            // 💡 新增：手机端专属的第一个按钮 "T" (文字排版开关)
+            if (!isDesktop)
+              IconButton(
+                icon: Icon(Icons.text_format, color: _showTextFormatBar ? Theme.of(context).primaryColor : Colors.blueGrey),
+                onPressed: () {
+                  setState(() => _showTextFormatBar = !_showTextFormatBar);
+                  // 弹出菜单时确保输入框有焦点
+                  if (_showTextFormatBar) FocusScope.of(context).requestFocus(_contentFocusNode);
+                }
+              ),
+
             IconButton(icon: const Icon(Icons.image_outlined, color: Colors.teal), tooltip: '选择图片', onPressed: () => _pickMedia('image')),
-            IconButton(icon: const Icon(Icons.content_paste, color: Colors.teal), tooltip: '粘贴图片', onPressed: _checkAndPasteImage),
-            IconButton(icon: const Icon(Icons.motion_photos_on_outlined, color: Colors.amber), tooltip: '插入 Live 图', onPressed: () => _pickMedia('live')),
+            
+            // 💡 限制：剪贴板按钮仅电脑端可用
+            if (isDesktop) 
+              IconButton(icon: const Icon(Icons.content_paste, color: Colors.teal), tooltip: '粘贴图片', onPressed: _checkAndPasteImage),
+            
+            // IconButton(icon: const Icon(Icons.motion_photos_on_outlined, color: Colors.amber), tooltip: '插入 Live 图', onPressed: () => _pickMedia('live')),
             IconButton(icon: const Icon(Icons.videocam_outlined, color: Colors.teal), tooltip: '插入视频', onPressed: () => _pickMedia('video')),
             IconButton(
                 icon: const Icon(Icons.mic_none_outlined, color: Colors.teal),
@@ -1432,42 +1640,22 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          ListTile(
-                            leading: const Icon(Icons.mic, color: Colors.redAccent),
-                            title: const Text("录制新语音"),
-                            onTap: () {
-                              Navigator.pop(c);
-                              showModalBottomSheet(context: context, builder: (c2) => VoiceRecorderDialog(onRecordComplete: (path) => _saveMediaFile(path, 'audio')));
-                            },
-                          ),
-                          ListTile(
-                            leading: const Icon(Icons.audio_file, color: Colors.teal),
-                            title: const Text("从手机/电脑导入音频"),
-                            onTap: () {
-                              Navigator.pop(c);
-                              _pickMedia('audio');
-                            },
-                          ),
+                          ListTile(leading: const Icon(Icons.mic, color: Colors.redAccent), title: const Text("录制新语音"), onTap: () { Navigator.pop(c); showModalBottomSheet(context: context, builder: (c2) => VoiceRecorderDialog(onRecordComplete: (path) => _saveMediaFile(path, 'audio'))); }),
+                          ListTile(leading: const Icon(Icons.audio_file, color: Colors.teal), title: const Text("导入音频"), onTap: () { Navigator.pop(c); _pickMedia('audio'); }),
                         ],
                       ),
                     ),
                   );
                 }),
             IconButton(icon: const Icon(Icons.attach_file_outlined, color: Colors.teal), tooltip: '添加附件', onPressed: () => _pickMedia('file')),
+            IconButton(icon: const Icon(Icons.auto_awesome, color: Colors.deepPurpleAccent), tooltip: 'AI 写作魔法', onPressed: _showAIAssistantMenu),
 
-            // ============================================
-            // 💡 C. 手机端独享：最后边的“收起键盘”图标
-            // ============================================
-            if (!isDesktop) // 💡 优化：仅在手机端显示，电脑端不需此功能
+            if (!isDesktop)
               IconButton(
-                icon: const Icon(Icons.keyboard_hide, color: Colors.grey), // 💡 使用专业灰，不抢多媒体图标风头
+                icon: const Icon(Icons.keyboard_hide, color: Colors.grey),
                 tooltip: '收起键盘',
-                onPressed: () {
-                  // 💡 退出键盘的核心逻辑
-                  FocusScope.of(context).unfocus();
-                },
+                onPressed: () => FocusScope.of(context).unfocus(),
               ),
-            // 💡 手机端 spaceEvenly 将自动重新计算所有 7 个图标，再次实现完美的全屏均匀对齐。
           ]
         ));
   }
@@ -1486,8 +1674,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                 ..._videoPaths.asMap().entries.map((entry) => _buildMediaItem(
                     path: entry.value,
                     isVideo: true,
-                    onDelete: () =>
-                        setState(() => _videoPaths.removeAt(entry.key)),
+                    onDelete: () => setState(() { _videoPaths.removeAt(entry.key); _hasRealChanges = true; }),
                     onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(
@@ -1497,8 +1684,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                 ..._imagePaths.asMap().entries.map((entry) => _buildMediaItem(
                     path: entry.value,
                     isVideo: false,
-                    onDelete: () =>
-                        setState(() => _imagePaths.removeAt(entry.key)),
+                    onDelete: () => setState(() { _imagePaths.removeAt(entry.key); _hasRealChanges = true; }),
                     onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(
@@ -1519,7 +1705,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
                 IconButton(
                   icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                   onPressed: () {
-                    setState(() => _audioPaths.removeAt(entry.key));
+                    setState(() { _audioPaths.removeAt(entry.key); _hasRealChanges = true; });
                     _performAutoSave(); // 删完立刻自动保存
                   }
                 ),
@@ -1536,7 +1722,7 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
               trailing: IconButton(
                 icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                 onPressed: () {
-                  setState(() => _attachments.removeAt(entry.key));
+                  setState(() { _attachments.removeAt(entry.key); _hasRealChanges = true; }); // 💡 补上
                   _performAutoSave(); // 删完立刻自动保存
                 }
               ),
@@ -1721,8 +1907,10 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
       final ImagePicker picker = ImagePicker();
       try {
         if (type == 'image' || type == 'live') {
-          // 支持一次性多选图片
-          final List<XFile> images = await picker.pickMultiImage();
+
+          final List<XFile> images = await picker.pickMultiImage(
+            imageQuality: 80, // 💡 适当压缩，提升处理速度
+          );
           for (var img in images) {
             if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('正在处理...'), duration: Duration(milliseconds: 500)));
             await _saveMediaFile(img.path, 'image');
@@ -1771,6 +1959,249 @@ class _DiaryEditPageState extends State<DiaryEditPage> with WidgetsBindingObserv
     } catch (e) {
       debugPrint("取消选择或打开失败: $e");
     }
+  }
+  // =======================================================
+  // 💡 ✨ AI 智能助手相关逻辑 ✨
+  // =======================================================
+
+  void _showAIAssistantMenu() {
+    if (_isArchived) return;
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (c) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Text("✨ AI 写作魔法", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.deepPurple)),
+            ),
+            ListTile(
+              leading: const CircleAvatar(backgroundColor: Colors.deepOrange, child: Icon(Icons.mic_external_on, color: Colors.white, size: 20)),
+              title: const Text("语音速记整理"),
+              subtitle: const Text("录制语音，AI 自动去除废话并整理成排版清晰的文字", style: TextStyle(fontSize: 12)),
+              onTap: () { Navigator.pop(c); _handleAIVoiceMemo(); },
+            ),
+            ListTile(
+              leading: const CircleAvatar(backgroundColor: Colors.blue, child: Icon(Icons.title, color: Colors.white, size: 20)),
+              title: const Text("帮我起标题"),
+              subtitle: const Text("根据正文生成 3 个文艺标题供选择", style: TextStyle(fontSize: 12)),
+              onTap: () { Navigator.pop(c); _handleAITTitle(); },
+            ),
+            ListTile(
+              leading: const CircleAvatar(backgroundColor: Colors.amber, child: Icon(Icons.edit_document, color: Colors.white, size: 20)),
+              title: const Text("润色扩写"),
+              subtitle: const Text("将干瘪的流水账变身成有温度的故事", style: TextStyle(fontSize: 12)),
+              onTap: () { Navigator.pop(c); _handleAIPolish(); },
+            ),
+            ListTile(
+              leading: const CircleAvatar(backgroundColor: Colors.teal, child: Icon(Icons.sell, color: Colors.white, size: 20)),
+              title: const Text("自动提取标签"),
+              subtitle: const Text("理解文意，自动填入符合主题的 #标签", style: TextStyle(fontSize: 12)),
+              onTap: () { Navigator.pop(c); _handleAITags(); },
+            ),
+            ListTile(
+              leading: const CircleAvatar(backgroundColor: Colors.pinkAccent, child: Icon(Icons.mood, color: Colors.white, size: 20)),
+              title: const Text("推测心情与天气"),
+              subtitle: const Text("从字里行间感受你的情绪并自动选择表情", style: TextStyle(fontSize: 12)),
+              onTap: () { Navigator.pop(c); _handleAIMoodWeather(); },
+            ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      )
+    );
+  }
+
+  void _handleAITTitle() async {
+    final content = contentController.text;
+    if (content.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("📝 请先写点正文再生成标题哦！")));
+      return;
+    }
+    setState(() => _isAILoading = true);
+    final titles = await AIService.generateTitles(content);
+    setState(() => _isAILoading = false);
+
+    if (titles.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("⚠️ 生成失败，请检查网络或配置")));
+      return;
+    }
+
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (c) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Text("请选择喜欢的标题", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            ),
+            ...titles.map((t) => ListTile(
+              leading: const Icon(Icons.lightbulb_outline, color: Colors.amber),
+              title: Text(t, style: const TextStyle(fontWeight: FontWeight.w500)),
+              onTap: () {
+                setState(() { titleController.text = t; _hasRealChanges = true; });
+                _performAutoSave();
+                Navigator.pop(c);
+              }
+            )),
+            const SizedBox(height: 10),
+          ],
+        )
+      )
+    );
+  }
+
+  void _handleAIPolish() async {
+    final content = contentController.text;
+    if (content.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("📝 请先写点想润色的内容吧！")));
+      return;
+    }
+    setState(() => _isAILoading = true);
+    final newContent = await AIService.polishContent(content);
+    setState(() => _isAILoading = false);
+
+    if (newContent.contains("请求失败") || newContent.contains("异常") || newContent.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("⚠️ $newContent")));
+      return;
+    }
+
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Row(children: [Icon(Icons.auto_awesome, color: Colors.amber), SizedBox(width: 8), Text("AI 润色预览")]),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Text(newContent, style: const TextStyle(height: 1.6, fontSize: 15)),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text("放弃", style: TextStyle(color: Colors.grey))),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColor, foregroundColor: Colors.white),
+            onPressed: () {
+              setState(() { contentController.text = newContent; _hasRealChanges = true; });
+              _performAutoSave();
+              Navigator.pop(c);
+            },
+            child: const Text("替换原文")
+          )
+        ]
+      )
+    );
+  }
+
+  void _handleAITags() async {
+    final content = contentController.text;
+    if (content.trim().isEmpty) return;
+    
+    setState(() => _isAILoading = true);
+    final tags = await AIService.extractTags(content);
+    setState(() => _isAILoading = false);
+
+    if (tags.isNotEmpty && !tags.contains("失败") && !tags.contains("异常")) {
+      setState(() { 
+         String oldTags = tagsController.text.trim();
+         tagsController.text = oldTags.isEmpty ? tags : "$oldTags $tags";
+         _hasRealChanges = true; 
+      });
+      _performAutoSave();
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ 标签已自动生成并补充")));
+    }
+  }
+
+  void _handleAIMoodWeather() async {
+    final content = contentController.text;
+    if (content.trim().isEmpty) return;
+
+    setState(() => _isAILoading = true);
+    final result = await AIService.inferMoodWeather(content);
+    setState(() => _isAILoading = false);
+    
+    if (result != null) {
+      setState(() {
+         if (AppConstants.moodMap.containsKey(result['mood'])) _selectedMoodKey = result['mood']!;
+         if (AppConstants.weatherMap.containsKey(result['weather'])) _selectedWeatherKey = result['weather']!;
+         _hasRealChanges = true;
+      });
+      _performAutoSave();
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ 心情与天气已自动匹配")));
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("⚠️ 自动匹配失败，可能内容特征不够明显")));
+    }
+  }
+  void _handleAIVoiceMemo() {
+    if (_isArchived) return;
+    
+    // 拉起原有的录音面板
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(15))),
+      builder: (c2) => VoiceRecorderDialog(
+        onRecordComplete: (path) async {
+          // 💡 录音结束后，立刻进入全屏接管状态
+          setState(() {
+            _isAILoading = true;
+            _aiLoadingText = "🎤 正在将语音转为文字...";
+          });
+
+          // 第一步：调用 Whisper 把音频转成毫无排版的碎碎念
+          String rawText = await AIService.speechToText(path);
+
+          if (rawText.contains("失败") || rawText.contains("异常") || rawText.trim().isEmpty) {
+            setState(() => _isAILoading = false);
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("⚠️ $rawText")));
+            return;
+          }
+
+          // 第二步：UI 提示改变，开始洗稿
+          setState(() {
+            _aiLoadingText = "✨ 正在剔除废话并智能排版...";
+          });
+
+          String organizedText = await AIService.organizeVoiceMemo(rawText);
+          
+          setState(() {
+            _isAILoading = false;
+            _aiLoadingText = "🪄 小满正在施展魔法..."; // 重置文案
+          });
+
+          if (organizedText.contains("失败") || organizedText.contains("异常") || organizedText.isEmpty) {
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("⚠️ $organizedText")));
+            return;
+          }
+
+          // 第三步：将整理好的完美文字插入编辑器
+          if (mounted) {
+            setState(() {
+              String current = contentController.text;
+              // 智能拼接：如果原来有内容，就空两行再追加；没有就直接填入
+              contentController.text = current.trim().isEmpty ? organizedText : "$current\n\n$organizedText";
+              _hasRealChanges = true;
+            });
+            _performAutoSave();
+            ScaffoldMessenger.of(context).showSnackBar(
+  SnackBar( // 去掉外层的 const
+    content: const Text("✅ 语音速记已智能整理并插入正文"), // 把 const 给到固定的 Text
+    backgroundColor: Colors.teal,
+  )
+);
+          }
+          
+          try {
+            File(path).delete();
+          } catch (_) {}
+        }
+      )
+    );
   }
 }
 

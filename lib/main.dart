@@ -10,6 +10,7 @@ import 'core/database_helper.dart';
 import 'pages/home_page.dart';
 import '../core/encryption_service.dart'; 
 import 'package:flutter_native_splash/flutter_native_splash.dart';
+import 'package:intl/date_symbol_data_local.dart'; // 💡 引入这行
 
 final ValueNotifier<Color> globalThemeColor = ValueNotifier<Color>(Colors.teal);
 final GlobalKey<NavigatorState> globalNavigatorKey = GlobalKey<NavigatorState>();
@@ -19,6 +20,7 @@ final ValueNotifier<bool> globalEyeCareMode = ValueNotifier(false);
 void main() async {
   // 1. 绑定 Flutter 引擎
   WidgetsFlutterBinding.ensureInitialized();
+  await initializeDateFormatting('zh_CN', null);
   WidgetsBinding widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
   FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
   // 2. 数据库工厂分离 (仅需执行一次)

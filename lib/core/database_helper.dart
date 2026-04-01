@@ -336,9 +336,15 @@ class DatabaseHelper {
         // 💡 修复：将 copySync 改为 await copy！释放 UI 线程！
         await file.copy(p.join(assetsDir.path, name));
         relativePaths.add("assets/$name");
-      }
+      } else {
+       // 💡 修复：如果文件暂时找不到（可能是挂载问题或路径漂移），
+       // 也要尽量保留相对路径，而不是直接把路径从 metadata 里删掉！
+       if (path.contains('assets/')) {
+         relativePaths.add("assets/${p.basename(path)}");
+       }
     }
-    return relativePaths;
+  }
+  return relativePaths;
   }
 
   // ================= 日记读写逻辑 =================
@@ -381,7 +387,7 @@ class DatabaseHelper {
         // 使用 trimRight() 只去掉尾部多余的空行，保留头部的缩进空格
         result['content'] = rawBody.trimRight();
         // 解析 YAML 头部中的媒体路径 (💡 读取时全部执行 p.normalize，抹平系统差异)
-        for (String line in yamlStr.split('\n')) {
+        for (String line in yamlStr.split(RegExp(r'\r?\n'))) {
           if (line.startsWith('images:')) {
             try {
               List<String> relImgs = List<String>.from(
@@ -520,8 +526,9 @@ class DatabaseHelper {
         "is_locked: ${diary['is_locked'] ?? 0}\n"
         "is_archived: ${diary['is_archived'] ?? 0}\n"
         "is_starred: ${diary['is_starred'] ?? 0}\n"
-        "is_trash: ${diary['is_trash'] ?? 0}\n" // 💡 务必补上这行！
+        "is_trash: ${diary['is_trash'] ?? 0}\n" 
         "delete_time: ${diary['delete_time'] ?? ''}\n"
+        "update_time: ${diary['update_time'] ?? DateTime.now().toString()}\n"
         "pwd_hash: ${diary['pwd_hash'] ?? ''}\n"
         "location: $yamlLocation\n"
         "type: ${diary['type'] ?? 0}\n"
@@ -551,7 +558,7 @@ class DatabaseHelper {
       'is_locked': diary['is_locked'] ?? 0,
       'is_archived': diary['is_archived'] ?? 0,
       'pwd_hash': diary['pwd_hash'],
-      'update_time': DateTime.now().toString(),
+      'update_time': diary['update_time'] ?? DateTime.now().toString(),
       'location': diary['location'],
       'is_starred': diary['is_starred'] ?? 0,
       'type': diary['type'] ?? 0,
@@ -709,6 +716,7 @@ class DatabaseHelper {
         "is_starred: ${diary['is_starred'] ?? 0}\n"
         "is_trash: ${diary['is_trash'] ?? 0}\n" // 💡 务必补上这行！
         "delete_time: ${diary['delete_time'] ?? ''}\n"
+        "update_time: ${diary['update_time'] ?? DateTime.now().toString()}\n"
         "pwd_hash: ${diary['pwd_hash'] ?? ''}\n"
         "location: $yamlLocation\n"
         "type: ${diary['type'] ?? 0}\n"
@@ -745,7 +753,7 @@ class DatabaseHelper {
         'is_locked': diary['is_locked'] ?? 0,
         'is_archived': diary['is_archived'] ?? 0,
         'pwd_hash': diary['pwd_hash'],
-        'update_time': DateTime.now().toString(),
+        'update_time': diary['update_time'] ?? DateTime.now().toString(),
         'location': diary['location'],
         'type': diary['type'] ?? 0,
       },
@@ -797,8 +805,9 @@ class DatabaseHelper {
         "is_locked: ${diary['is_locked'] ?? 0}\n"
         "is_archived: ${diary['is_archived'] ?? 0}\n"
         "is_starred: ${diary['is_starred'] ?? 0}\n"
-        "is_trash: ${diary['is_trash'] ?? 0}\n" // 💡 务必补上这行！
+        "is_trash: ${diary['is_trash'] ?? 0}\n" 
         "delete_time: ${diary['delete_time'] ?? ''}\n"
+        "update_time: ${diary['update_time'] ?? DateTime.now().toString()}\n"
         "pwd_hash: ${diary['pwd_hash'] ?? ''}\n"
         "location: $yamlLocation\n"
         "type: ${diary['type'] ?? 0}\n"
@@ -853,96 +862,109 @@ class DatabaseHelper {
         List<String> vids = [];
         List<String> auds = [];
 
+        try { imgs = List<String>.from(jsonDecode((fullDiary['imagePath'] as String?) ?? '[]')); } catch (_) {}
+        try { atts = List<String>.from(jsonDecode((fullDiary['attachments'] as String?) ?? '[]')); } catch (_) {}
         try {
-          imgs = List<String>.from(
-            jsonDecode((fullDiary['imagePath'] as String?) ?? '[]'),
-          );
-        } catch (_) {}
-        try {
-          atts = List<String>.from(
-            jsonDecode((fullDiary['attachments'] as String?) ?? '[]'),
-          );
-        } catch (_) {}
-        try {
-          vids = List<String>.from(
-            jsonDecode((fullDiary['videoPaths'] as String?) ?? '[]'),
-          );
+          vids = List<String>.from(jsonDecode((fullDiary['videoPaths'] as String?) ?? '[]'));
         } catch (_) {
-          if (fullDiary['videoPath'] != null)
-            vids.add(fullDiary['videoPath'] as String);
+          if (fullDiary['videoPath'] != null) vids.add(fullDiary['videoPath'] as String);
         }
         try {
-          auds = List<String>.from(
-            jsonDecode((fullDiary['audioPaths'] as String?) ?? '[]'),
-          );
+          auds = List<String>.from(jsonDecode((fullDiary['audioPaths'] as String?) ?? '[]'));
         } catch (_) {
-          if (fullDiary['audioPath'] != null)
-            auds.add(fullDiary['audioPath'] as String);
+          if (fullDiary['audioPath'] != null) auds.add(fullDiary['audioPath'] as String);
         }
 
-        // 💡 引入异步安全删除工具
-        void safeDeleteBackground(String path) {
+        // 💡 修复 1：安全的媒体文件独立删除器
+        void safeDeleteMedia(String path) {
           Future.delayed(const Duration(milliseconds: 500), () async {
             try {
-              File f = File(path);
-              if (await f.exists()) await f.delete();
+              File f = File(path); // ✅ 正确使用传入的 media path，而不是 mdPath！
+              if (await f.exists()) {
+                await f.delete();
+                debugPrint("🔥 已物理粉碎附属媒体文件: $path");
+              }
             } catch (_) {}
           });
         }
 
         // 物理粉碎所有数组里的源文件
-        for (String img in imgs) safeDeleteBackground(img);
-        for (String att in atts) safeDeleteBackground(att);
-        for (String vid in vids) safeDeleteBackground(vid);
-        for (String aud in auds) safeDeleteBackground(aud);
+        for (String img in imgs) safeDeleteMedia(img);
+        for (String att in atts) safeDeleteMedia(att);
+        for (String vid in vids) safeDeleteMedia(vid);
+        for (String aud in auds) safeDeleteMedia(aud);
 
-        // 粉碎 md 文件
-        // 💡 终极安全补丁：生成墓碑文件 (Tombstone)，利用同步机制摧毁云端备份
+        // 💡 修复 2：彻底粉碎 MD 文件，并登记到“死亡名单”，让云端同步时知道去删云端备份
         Future.delayed(const Duration(milliseconds: 500), () async {
           try {
             File f = File(p.join(root, mdPath));
             if (await f.exists()) {
-              // 不删除文件，而是覆盖为墓碑标记，利用 WebDAV 上传覆盖云端实体！
-              await f.writeAsString("---\nis_deleted: 1\n---\n");
+              await f.delete(); // ✅ 没有任何废话，直接从物理硬盘抹除！
+              debugPrint("🔥 已彻底物理粉碎日记文件: $mdPath");
             }
+            // 记入全局销毁名单，WebDAV 同步引擎读到这个名单后，会去把网盘里的这个文件也删掉
+            await _recordDeletedFile(mdPath); 
           } catch (_) {}
         });
       }
     }
+    // 抹除 SQLite 数据库记录
     return await db.delete('diaries', where: 'id = ?', whereArgs: [id]);
   }
 
   // ================= 列表获取逻辑 =================
 
-  // 💡 核心引擎：动态绝对路径转换器
-  // 将底层高度便携的“相对路径”，动态拼接为当前沙盒的“绝对路径”，彻底根除模拟器图片丢失问题！
-  Future<List<Map<String, dynamic>>> _mapAbsolutePaths(
-      List<Map<String, dynamic>> rows) async {
+  // 💡 核心引擎：动态绝对路径转换器 (终极防崩溃与跨端自适应版)
+  Future<List<Map<String, dynamic>>> _mapAbsolutePaths(List<Map<String, dynamic>> rows) async {
     final root = await rootDir;
     List<Map<String, dynamic>> result = [];
+    
     for (var row in rows) {
       var mutableRow = Map<String, dynamic>.from(row);
-      String dateStr = mutableRow['date'] as String? ?? '1900-01-01 00:00:00';
-      DateTime date = DateTime.tryParse(dateStr) ?? DateTime.now();
-      String yearMonth =
-          "${date.year}-${date.month.toString().padLeft(2, '0')}";
 
-      for (String key in [
-        'image_path',
-        'video_path',
-        'audio_path',
-        'attachments'
-      ]) {
+      // 必须根据实际物理文件路径 (md_path) 提取所属月份
+      String yearMonth;
+      String? mdPath = mutableRow['md_path'] as String?;
+      if (mdPath != null && mdPath.isNotEmpty) {
+        yearMonth = p.dirname(mdPath);
+      } else {
+        String dateStr = mutableRow['date'] as String? ?? '1900-01-01 00:00:00';
+        DateTime date = DateTime.tryParse(dateStr) ?? DateTime.now();
+        yearMonth = "${date.year}-${date.month.toString().padLeft(2, '0')}";
+      }
+
+      for (String key in ['image_path', 'video_path', 'audio_path', 'attachments']) {
         String? jsonStr = mutableRow[key] as String?;
-        if (jsonStr != null && jsonStr.isNotEmpty) {
+        if (jsonStr != null && jsonStr.isNotEmpty && jsonStr != 'null') {
           try {
             List<String> relPaths = List<String>.from(jsonDecode(jsonStr));
             List<String> absPaths = relPaths.map((r) {
-              if (p.isAbsolute(r)) return r; // 兼容旧数据
-              return p.normalize(p.join(root, yearMonth, r));
+              
+              // ========================================================
+              // 💥 终极修复：跨端绝对路径“基因突变”抹除机制
+              // 如果旧数据或同步过来的 YAML 携带了另一台设备（如安卓）的绝对路径
+              // 我们在这里强制将其“洗白”为相对于当前 Windows 设备的相对路径！
+              // ========================================================
+              String cleanRel = r;
+              if (p.isAbsolute(r) || r.contains('MyDiary_Data')) {
+                // 如果发现它是脏路径，强行提取出 assets/文件名
+                if (r.contains('assets/') || r.contains(r'assets\')) {
+                  cleanRel = 'assets/${p.basename(r)}';
+                } else {
+                  cleanRel = p.basename(r); // 兼容极其古老的根目录文件
+                }
+              }
+              
+              // 使用洗白后的干净相对路径，完美拼接出属于当前电脑的真实绝对路径
+              return p.normalize(p.join(root, yearMonth, cleanRel));
+              
             }).toList();
             mutableRow[key] = jsonEncode(absPaths);
-          } catch (_) {}
+          } catch (_) {
+            mutableRow[key] = '[]';
+          }
+        } else {
+          mutableRow[key] = '[]';
         }
       }
       result.add(mutableRow);
@@ -999,7 +1021,6 @@ class DatabaseHelper {
       
       if (!await dataDir.exists()) return null;
 
-      // 1. 主线程预扫码
       final allFiles = dataDir.listSync(recursive: true)
           .whereType<File>()
           .map((f) => f.path)
@@ -1007,27 +1028,21 @@ class DatabaseHelper {
       
       if (allFiles.isEmpty) return null;
 
-      // 2. 释放数据库锁
       if (_database != null) {
         await _database!.close();
         _database = null;
         await Future.delayed(const Duration(milliseconds: 500)); 
       }
 
-      // 3. 💡 核心变动：后台线程计算 ZIP 字节流并返回
-      final Uint8List? zipBytes = await compute(_performZipTaskV2, {
+      // 💡 核心修复：不再返回字节流，让后台线程直接写盘！传入 outPath。
+      final String? resultPath = await compute(_performZipTaskV2, {
         'root': root,
         'files': allFiles.join('|'),
+        'outPath': savePath, 
       });
-      
-      // 4. 在主线程一次性同步写入，确保文件完整性
-      if (zipBytes != null && zipBytes.isNotEmpty) {
-        File(savePath).writeAsBytesSync(zipBytes);
-        debugPrint("💾 磁盘写入成功：${zipBytes.length} 字节");
-      }
 
       await database; // 重启数据库
-      return savePath;
+      return resultPath; 
     } catch (e) {
       debugPrint("备份失败: $e");
       await database;
@@ -1062,7 +1077,8 @@ class DatabaseHelper {
   }
   
 
-  // ================= 跨端同步核心：一键重建本地索引 (融合静默垃圾回收与规范重命名) =================
+  // ================= 跨端同步核心：一键重建本地索引 (完美修复安全版) =================
+  // ================= 跨端同步核心：一键重建本地索引 (完美修复安全版) =================
   Future<int> rebuildIndexFromLocalFiles() async {
     final db = await instance.database;
     final root = await rootDir;
@@ -1071,31 +1087,24 @@ class DatabaseHelper {
     if (!rootDirectory.existsSync()) return 0;
 
     final batch = db.batch();
-    batch.delete('diaries');
+    batch.delete('diaries'); // 先清空旧数据库
 
     int count = 0;
     final entities = rootDirectory.listSync();
     for (var entity in entities) {
       if (entity is Directory) {
-        if (!RegExp(r'^\d{4}-\d{2}$').hasMatch(p.basename(entity.path)))
-          continue;
+        if (!RegExp(r'^\d{4}-\d{2}$').hasMatch(p.basename(entity.path))) continue;
 
-        final files = entity
-            .listSync()
-            .whereType<File>()
-            .where((f) => f.path.endsWith('.md'));
+        final files = entity.listSync().whereType<File>().where((f) => f.path.endsWith('.md'));
         for (var file in files) {
           try {
             String content = await file.readAsString();
             if (content.startsWith('---')) {
-              int endIdx = content.indexOf('\n---\n', 3);
+              int endIdx = content.indexOf(RegExp(r'\r?\n---\r?\n'), 3);
               if (endIdx != -1) {
                 String yamlStr = content.substring(3, endIdx);
-                String rawBody = content.substring(endIdx + 5);
-                if (rawBody.startsWith('\n'))
-                  rawBody = rawBody.substring(1);
-                else if (rawBody.startsWith('\r\n'))
-                  rawBody = rawBody.substring(2);
+                int offset = content.substring(endIdx).startsWith('\r\n') ? 7 : 5;
+                String rawBody = content.substring(endIdx + offset);
 
                 Map<String, dynamic> diaryData = {
                   'title': '无标题',
@@ -1110,54 +1119,54 @@ class DatabaseHelper {
                   'type': 0,
                   'md_path': _normalizePath(p.relative(file.path, from: root)),
                   'is_trash': 0,
-                  'update_time': DateTime.now().toString(),
+                  'update_time': null,
+                  'image_path': '[]',
+                  'video_path': '[]',
+                  'audio_path': '[]',
+                  'attachments': '[]',
                 };
 
-                for (String line in yamlStr.split('\n')) {
+                for (String line in yamlStr.split(RegExp(r'\r?\n'))) {
                   int colonIdx = line.indexOf(':');
                   if (colonIdx != -1) {
                     String key = line.substring(0, colonIdx).trim();
                     String value = line.substring(colonIdx + 1).trim();
 
-                    if (key == 'title')
-                      diaryData['title'] = value;
-                    else if (key == 'date')
-                      diaryData['date'] = value;
-                    else if (key == 'weather')
-                      diaryData['weather'] = value;
-                    else if (key == 'mood')
-                      diaryData['mood'] = value;
-                    else if (key == 'tags')
-                      diaryData['tags'] = value;
-                    else if (key == 'is_locked')
-                      diaryData['is_locked'] = int.tryParse(value) ?? 0;
-                    else if (key == 'is_archived')
-                      diaryData['is_archived'] = int.tryParse(value) ?? 0;
-                    else if (key == 'is_starred')
-                      diaryData['is_starred'] = int.tryParse(value) ?? 0;
-                    else if (key == 'type')
-                      diaryData['type'] = int.tryParse(value) ?? 0;
-                    else if (key == 'pwd_hash')
-                      diaryData['pwd_hash'] = value.isEmpty ? null : value;
-                    else if (key == 'location')
-                      diaryData['location'] = value.isEmpty ? null : value;
-                    else if (key == 'is_trash')
-                      diaryData['is_trash'] = int.tryParse(value) ?? 0;
-                    else if (key == 'delete_time')
-                      diaryData['delete_time'] = value.isEmpty ? null : value;
-                    else if (key == 'is_deleted')
-                      diaryData['is_deleted'] = int.tryParse(value) ?? 0;
-                    else if (key == 'images')
+                    if (key == 'title') diaryData['title'] = value;
+                    else if (key == 'date') diaryData['date'] = value;
+                    else if (key == 'weather') diaryData['weather'] = value;
+                    else if (key == 'mood') diaryData['mood'] = value;
+                    else if (key == 'tags') diaryData['tags'] = value;
+                    else if (key == 'is_locked') diaryData['is_locked'] = int.tryParse(value) ?? 0;
+                    else if (key == 'is_archived') diaryData['is_archived'] = int.tryParse(value) ?? 0;
+                    else if (key == 'is_starred') diaryData['is_starred'] = int.tryParse(value) ?? 0;
+                    else if (key == 'type') diaryData['type'] = int.tryParse(value) ?? 0;
+                    else if (key == 'pwd_hash') diaryData['pwd_hash'] = value.isEmpty ? null : value;
+                    else if (key == 'location') diaryData['location'] = value.isEmpty ? null : value;
+                    else if (key == 'is_trash') diaryData['is_trash'] = int.tryParse(value) ?? 0;
+                    else if (key == 'delete_time') diaryData['delete_time'] = value.isEmpty ? null : value;
+                    else if (key == 'update_time') diaryData['update_time'] = value.isEmpty ? null : value; // 💡 新增解析
+                    else if (key == 'is_deleted') diaryData['is_deleted'] = int.tryParse(value) ?? 0;
+                    else if (key == 'images' || key == 'image_path' || key == 'imagePath') {
                       diaryData['image_path'] = value;
-                    else if (key == 'videos')
-                      diaryData['video_path'] = value;
-                    else if (key == 'audios')
-                      diaryData['audio_path'] = value;
-                    else if (key == 'attachments')
-                      diaryData['attachments'] = value;
+                    }
+                    else if (key == 'videos') diaryData['video_path'] = value;
+                    else if (key == 'audios') diaryData['audio_path'] = value;
+                    else if (key == 'attachments') diaryData['attachments'] = value;
+                    
                   }
                 }
-                if (diaryData['is_deleted'] == 1) continue;
+                
+                // 💡 兼容老版本遗留的墓碑：一旦发现，顺手当场物理火化，保持文件夹整洁！
+                if (diaryData['is_deleted'] == 1) {
+                  try { file.deleteSync(); } catch (_) {}
+                  continue; 
+                }
+                diaryData.remove('is_deleted');
+                
+                // 老日记如果没有记录过修改时间，则默认等同于创建时间
+                if (diaryData['update_time'] == null) diaryData['update_time'] = diaryData['date']; 
+                
                 batch.insert('diaries', diaryData);
                 count++;
               }
@@ -1169,117 +1178,42 @@ class DatabaseHelper {
       }
     }
 
-    // 1. 先将最纯净的文本数据一次性写入数据库
+    // 将合法数据一次性写入数据库
     await batch.commit(noResult: true);
 
-    // =========================================================================
-    // 💡 核心修复 3：无感智能瘦身与附件重命名引擎 (寄生在重建索引流程中，绝不打扰用户)
-    // =========================================================================
+    // ==========================================================
+    // 🧹 终极补丁：本地孤儿多媒体垃圾回收 (Local GC)
+    // 根据刚才确立的“真理名单”，物理粉碎所有未被引用的废弃照片/视频
+    // ==========================================================
     try {
-      final rows = await db.query('diaries');
-      final allDiaries = await _mapAbsolutePaths(rows);
-      Set<String> legalAbsolutePaths = {};
-      Map<int, Map<String, dynamic>> updates = {};
+      Set<String> validAssets = await getAllValidAssetNames();
+      int orphanCount = 0;
 
-      // 【A】地毯式扫瞄合法文件，发现旧命名就瞬间重命名
-      for (var d in allDiaries) {
-        bool changed = false;
-        Map<String, dynamic> updateData = {};
-        String datePrefix =
-            (d['date'] as String? ?? '1900-01-01').substring(0, 10);
-        String yearMonth = datePrefix.substring(0, 7);
-
-        for (String key in [
-          'image_path',
-          'video_path',
-          'audio_path',
-          'attachments'
-        ]) {
-          String? jsonStr = d[key];
-          if (jsonStr == null || jsonStr.isEmpty) continue;
-          try {
-            List<String> absPaths = List<String>.from(jsonDecode(jsonStr));
-            List<String> newAbsPaths = [];
-
-            for (String path in absPaths) {
-              File file = File(path);
-              if (!file.existsSync()) continue;
-
-              String basename = p.basename(path);
-              // 判断：如果是以这篇日记的日期开头，并且有下划线，说明已经是标准命名
-              if (basename.startsWith(datePrefix) && basename.contains('_')) {
-                legalAbsolutePaths.add(p.normalize(path));
-                newAbsPaths.add(path);
-              } else {
-                // 不规范的历史图片：生成新的标准名称并重命名
-                String unique =
-                    "${file.path}_${DateTime.now().microsecondsSinceEpoch}";
-                final hash =
-                    md5.convert(utf8.encode(unique)).toString().substring(0, 8);
-                String newName =
-                    "${datePrefix}_${DateTime.now().millisecondsSinceEpoch}_$hash${p.extension(file.path)}";
-                String newAbsPath =
-                    p.normalize(p.join(root, yearMonth, 'assets', newName));
-
+      for (var entity in entities) {
+        if (entity is Directory && RegExp(r'^\d{4}-\d{2}$').hasMatch(p.basename(entity.path))) {
+          final assetsDir = Directory(p.join(entity.path, 'assets'));
+          
+          if (assetsDir.existsSync()) {
+            final mediaFiles = assetsDir.listSync().whereType<File>();
+            
+            for (var file in mediaFiles) {
+              String fileName = p.basename(file.path);
+              
+              // 💡 判决：如果硬盘上的这个文件，不在数据库的真理名单里，直接死刑！
+              if (!validAssets.contains(fileName)) {
                 try {
-                  file.renameSync(newAbsPath);
-                  legalAbsolutePaths.add(newAbsPath);
-                  newAbsPaths.add(newAbsPath);
-                  changed = true;
-                } catch (e) {
-                  try {
-                    file.copySync(newAbsPath);
-                    file.deleteSync();
-                    legalAbsolutePaths.add(newAbsPath);
-                    newAbsPaths.add(newAbsPath);
-                    changed = true;
-                  } catch (_) {
-                    // 如果依然失败，就保留原样，计入合法路径
-                    legalAbsolutePaths.add(p.normalize(path));
-                    newAbsPaths.add(path);
-                  }
-                }
+                  await file.delete();
+                  orphanCount++;
+                  debugPrint("🔥 成功焚毁本地孤儿文件: $fileName");
+                } catch (_) {}
               }
             }
-            if (changed) {
-              updateData[key] = jsonEncode(newAbsPaths
-                  .map((e) => _normalizePath(p.relative(e, from: root)))
-                  .toList());
-            }
-          } catch (_) {}
-        }
-        if (changed) {
-          updateData['id'] = d['id'];
-          updates[d['id']] = updateData;
-        }
-      }
-
-      // 【B】将改名后的新路径写回数据库和 .md 物理文件
-      for (var entry in updates.entries) {
-        await db.update('diaries', entry.value,
-            where: 'id = ?', whereArgs: [entry.key]);
-        await _syncDbToMd(entry.key);
-      }
-
-      // 【C】末日审判：巡视所有 assets 文件夹，凡是不在 legalAbsolutePaths 里的文件，直接物理粉碎！
-      for (var monthDir in rootDirectory.listSync().whereType<Directory>()) {
-        if (!RegExp(r'^\d{4}-\d{2}$').hasMatch(p.basename(monthDir.path)))
-          continue;
-        final assetsDir = Directory(p.join(monthDir.path, 'assets'));
-        if (!assetsDir.existsSync()) continue;
-
-        for (var file in assetsDir.listSync().whereType<File>()) {
-          String normPath = p.normalize(file.path);
-          if (!legalAbsolutePaths.contains(normPath)) {
-            try {
-              file.deleteSync();
-              debugPrint("🗑️ 静默重建索引清理了废弃垃圾: ${file.path}");
-            } catch (_) {}
           }
         }
       }
+      debugPrint("✅ 本地垃圾回收执行完毕，共清除了 $orphanCount 个孤儿文件");
     } catch (e) {
-      debugPrint("无感瘦身发生异常: $e");
+      debugPrint("本地垃圾回收发生异常: $e");
     }
 
     return count;
@@ -1312,28 +1246,27 @@ class DatabaseHelper {
     );
   }
 
-  // 💡 终极内存压缩引擎：返回完整的 ZIP 字节数组
-  static Future<Uint8List?> _performZipTaskV2(Map<String, String> params) async {
+  // 💡 终极流式压缩引擎：直接从硬盘读并写入硬盘，占用 0 内存！
+  static Future<String?> _performZipTaskV2(Map<String, String> params) async {
     final String rootPath = p.normalize(params['root']!).replaceAll('\\', '/');
     final List<String> fileList = params['files']!.split('|');
+    final String outPath = params['outPath']!; // 获取输出路径
     
-    final archive = Archive();
-    final encoder = ZipEncoder();
+    // 使用 ZipFileEncoder 直接操作硬盘
+    final encoder = ZipFileEncoder();
 
     try {
+      encoder.create(outPath);
+
       for (String rawPath in fileList) {
         try {
           final String currentPath = p.normalize(rawPath).replaceAll('\\', '/');
-          
-          // 计算纯净的相对路径
           String rel = p.relative(currentPath, from: rootPath).replaceAll('\\', '/');
 
-          // 强制清理 Windows 敏感的前缀字符
+          // 抹除各种奇怪的前缀
           while (rel.startsWith('/') || rel.startsWith('\\') || rel.startsWith('.')) {
-            rel = rel.replaceFirst('/', '').replaceFirst('\\', '').replaceFirst('.', '');
+            rel = rel.replaceFirst(RegExp(r'^[\/\\\.]+'), '');
           }
-          
-          // 彻底排除盘符泄露
           if (rel.contains(':')) {
              rel = rel.substring(rel.lastIndexOf(':') + 1);
              if (rel.startsWith('/')) rel = rel.substring(1);
@@ -1341,26 +1274,102 @@ class DatabaseHelper {
 
           if (rel.toLowerCase().startsWith('exports/')) continue;
 
-          // 💡 将文件读入内存并存入 Archive 对象
           final file = File(currentPath);
           if (file.existsSync()) {
-            final bytes = file.readAsBytesSync();
-            archive.addFile(ArchiveFile(rel, bytes.length, bytes));
-            debugPrint("📦 已装载: $rel");
+            encoder.addFile(file, rel); // 💡 流式写入压缩包
           }
-          
         } catch (e) {
-          debugPrint("处理文件失败: $e");
+          debugPrint("处理单文件失败: $e");
         }
       }
       
-      // 💡 执行最终编码，生成完整的 ZIP 字节流
-      return encoder.encode(archive) as Uint8List;
-      
+      encoder.close();
+      return outPath;
     } catch (e) {
       debugPrint("压缩引擎崩溃: $e");
       return null;
     }
   }
+  // lib/core/database_helper.dart
+
+  // 💡 新增：获取全库所有正在被引用的有效多媒体文件名
+  Future<Set<String>> getAllValidAssetNames() async {
+    final db = await instance.database;
+    // 注意：即使是在回收站里的日记（is_trash=1），只要没被彻底粉碎，附件也要保留
+    final rows = await db.query('diaries'); 
+    
+    Set<String> validNames = {};
+    for (var row in rows) {
+      for (String key in ['image_path', 'video_path', 'audio_path', 'attachments']) {
+        String? jsonStr = row[key] as String?;
+        if (jsonStr != null && jsonStr.isNotEmpty && jsonStr != 'null') {
+          try {
+            List<String> paths = List<String>.from(jsonDecode(jsonStr));
+            for (String path in paths) {
+              validNames.add(p.basename(path)); // 只提取纯文件名
+            }
+          } catch (_) {}
+        }
+      }
+    }
+    return validNames;
+  }
+  // ================= 全局销毁名单引擎 (Death Ledger) =================
+  Future<void> _recordDeletedFile(String relPath) async {
+    try {
+      final root = await rootDir;
+      final file = File(p.join(root, '.deleted_records.json'));
+      List<String> deletedList = [];
+      if (await file.exists()) {
+        try {
+          deletedList = List<String>.from(jsonDecode(await file.readAsString()));
+        } catch (_) {}
+      }
+      String cleanPath = relPath.replaceAll('\\', '/');
+      if (!deletedList.contains(cleanPath)) {
+        deletedList.add(cleanPath);
+        await file.writeAsString(jsonEncode(deletedList));
+      }
+    } catch (_) {}
+  }
+  // ================= 局域网快传：流式解压并合并数据 =================
+  Future<bool> restoreFromZip(String zipPath) async {
+    try {
+      final root = await rootDir;
+      final inputStream = InputFileStream(zipPath);
+      
+      // 💡 适配最新版 archive (4.x+): 使用 decodeStream
+      final archive = ZipDecoder().decodeStream(inputStream);
+
+      for (var file in archive.files) {
+        final safeName = file.name.replaceAll('\\', '/');
+        final outputPath = p.normalize(p.join(root, safeName));
+
+        if (!p.isWithin(root, outputPath)) continue;
+
+        if (file.isFile) {
+          final outputFile = File(outputPath);
+          if (!await outputFile.parent.exists()) {
+            await outputFile.parent.create(recursive: true);
+          }
+          
+          final outputStream = OutputFileStream(outputPath);
+          file.writeContent(outputStream);
+          
+          // 💡 新增：强制刷新缓冲区，确保数据真实落盘
+          outputStream.flush(); 
+          outputStream.closeSync();
+        } else {
+          Directory(outputPath).createSync(recursive: true);
+        }
+      }
+      
+      inputStream.close();
+      await rebuildIndexFromLocalFiles();
+      return true;
+    } catch (e) {
+      debugPrint("局域网恢复解压失败: $e");
+      return false;
+    }
+  }
 }
-  

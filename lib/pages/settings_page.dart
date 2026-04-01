@@ -16,6 +16,7 @@ import '../core/webdav_sync_service.dart';
 import '../core/encryption_service.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import '../pages/lan_sync_page.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -387,6 +388,42 @@ class _SettingsPageState extends State<SettingsPage> {
             content: Text('❌ 同步失败，请检查网络或配置'), backgroundColor: Colors.red));
       }
     }
+  }
+
+  // ==============================================================
+  // 💡 新增：WebDAV 退出登录与清除缓存弹窗逻辑
+  // ==============================================================
+  void _showLogoutConfirmDialog() {
+    showDialog(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text("断开 WebDAV 连接？"),
+        content: const Text("断开后将停止双端同步，您的网盘账号与密码将从本地安全清除。\n\n(已经同步到本地或云端的日记数据不会被删除)"),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text("取消", style: TextStyle(color: Colors.grey))),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () async {
+              Navigator.pop(c);
+              // 1. 调用底层的退出逻辑
+              await WebDavSyncService.instance.logout();
+              
+              // 2. 刷新设置页面的 UI 状态，让同步按钮消失
+              setState(() {
+                _webdavUrl = "";
+                _webdavUser = "";
+                _webdavPwd = "";
+              });
+              
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ 已安全断开 WebDAV")));
+              }
+            },
+            child: const Text("确认断开"),
+          ),
+        ],
+      ),
+    );
   }
 
   // ================= 3. 导入、备份与本地路径 =================
@@ -1191,6 +1228,17 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
           ),
           
+          // ==============================================================
+          // 💡 新增：一键关闭 WebDAV 按钮 (只有连上网盘后才会显示这行)
+          // ==============================================================
+          if (_webdavUrl.isNotEmpty)
+            ListTile(
+              leading: const Icon(Icons.cloud_off, color: Colors.redAccent),
+              title: const Text('断开 WebDAV 同步', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+              subtitle: const Text('安全清除本地保存的网盘账号配置', style: subtitleStyle),
+              onTap: _showLogoutConfirmDialog,
+            ),
+          
           // 3. 统一的备份目录绑定（仅限电脑端）
           if (Platform.isWindows || Platform.isMacOS || Platform.isLinux)
             ListTile(
@@ -1218,6 +1266,11 @@ class _SettingsPageState extends State<SettingsPage> {
                   tooltip: "立即打包备份"
                 )
             ),
+          ListTile(
+  leading: const Icon(Icons.wifi_tethering),
+  title: const Text('局域网速传'),
+  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const LanSyncPage())),
+),
           ListTile(
               leading: const Icon(Icons.archive_outlined, color: Colors.teal),
               title: const Text('导出完整备份包'),

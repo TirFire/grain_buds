@@ -21,7 +21,9 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'package:share_plus/share_plus.dart';
-import 'anniversaries_page.dart'; // 💡 新增这一行
+import 'anniversaries_page.dart';
+import 'retrospect_page.dart';
+import 'ai_chat_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -532,6 +534,28 @@ class _HomePageState extends State<HomePage> {
                   MaterialPageRoute(builder: (context) => const StatsPage()));
             },
           ),
+          ListTile(
+              leading: const Icon(Icons.auto_awesome, color: Colors.amber), 
+              title: const Text('时光回溯', style: TextStyle(fontWeight: FontWeight.bold)), //
+              onTap: () {
+                Navigator.pop(context); 
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const RetrospectPage()),
+                );
+              },
+            ),
+          ListTile(
+              leading: const Icon(Icons.psychology, color: Colors.deepPurple), 
+              title: const Text('AI小满', style: TextStyle(fontWeight: FontWeight.bold)), 
+              onTap: () {
+                Navigator.pop(context); 
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const AIChatPage()), // 💡 跳转到新页面
+                );
+              },
+            ),
           const Spacer(),
           const Divider(),
           ListTile(
@@ -832,6 +856,15 @@ class _HomePageState extends State<HomePage> {
                               MaterialPageRoute(
                                   builder: (context) => const StatsPage()));
                         }),
+                        _buildSideActionButton(Icons.auto_awesome, '时光回溯', () {
+                          Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (context) => const RetrospectPage()));
+                        }),
+                        _buildSideActionButton(Icons.psychology, 'AI小满', () {
+  Navigator.push(context, MaterialPageRoute(builder: (context) => const AIChatPage()));
+}),
                         const SizedBox(height: 10),
                         _buildSideActionButton(Icons.settings, '软件设置',
                             () async {
@@ -1031,11 +1064,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ================= 💡 新增：PDF 专属 Markdown 解析器 (终极完美版) =================
-  List<pw.Widget> _renderMarkdown(
-      String text, pw.Font regular, pw.Font bold, pw.Font emoji) {
+  List<pw.Widget> _renderMarkdown(String text, pw.Font regular, pw.Font bold, pw.Font emoji) {
     List<pw.Widget> widgets = [];
-    final lines = text.split('\n');
-
+    final lines = text.split('\n'); // 💡 直接 split
     // 💡 核心修复 1：强制显式注入 fallback，确保每一行文字哪怕混排中英文，也绝对不会丢失 Emoji
     final fallbackStyle = pw.TextStyle(font: regular, fontFallback: [emoji]);
     final fallbackBoldStyle = pw.TextStyle(font: bold, fontFallback: [emoji]);
@@ -1115,34 +1146,51 @@ class _HomePageState extends State<HomePage> {
     return widgets;
   }
 
-  pw.Widget _parseInline(
-      String text, pw.TextStyle regularStyle, pw.TextStyle boldStyle,
-      {bool isQuote = false}) {
-    final RegExp exp = RegExp(r'\*\*(.*?)\*\*');
+  pw.Widget _parseInline(String text, pw.TextStyle regularStyle, pw.TextStyle boldStyle, {bool isQuote = false}) {
+    // 💡 修复1：正则表达式加入 |\*(.*?)\*| 以捕获倾斜字体
+    final RegExp exp = RegExp(r'\*\*(.*?)\*\*|\*(.*?)\*|\[(red|blue|green|orange|purple)\](.*?)\[/\]|<font color="(red|blue|green|orange|purple)">(.*?)</font>|\[bg_(yellow|red|green|blue|purple)\](.*?)\[/bg\]');
     final Iterable<RegExpMatch> matches = exp.allMatches(text);
 
-    pw.TextStyle baseStyle = isQuote
-        ? regularStyle.copyWith(color: PdfColors.grey700)
-        : regularStyle;
-    pw.TextStyle bStyle =
-        isQuote ? boldStyle.copyWith(color: PdfColors.grey700) : boldStyle;
+    pw.TextStyle baseStyle = isQuote ? regularStyle.copyWith(color: PdfColors.grey700) : regularStyle;
+    pw.TextStyle bStyle = isQuote ? boldStyle.copyWith(color: PdfColors.grey700) : boldStyle;
 
-    if (matches.isEmpty)
-      return pw.Text(text, style: baseStyle.copyWith(lineSpacing: 3));
+    if (matches.isEmpty) return pw.Text(text, style: baseStyle.copyWith(lineSpacing: 3));
 
     List<pw.TextSpan> spans = [];
     int lastMatchEnd = 0;
     for (final match in matches) {
       if (match.start > lastMatchEnd) {
-        spans.add(pw.TextSpan(
-            text: text.substring(lastMatchEnd, match.start), style: baseStyle));
+        spans.add(pw.TextSpan(text: text.substring(lastMatchEnd, match.start), style: baseStyle));
       }
-      spans.add(pw.TextSpan(text: match.group(1), style: bStyle));
+      if (match.group(1) != null) { 
+        // 渲染加粗
+        spans.add(pw.TextSpan(text: match.group(1), style: bStyle));
+      } else if (match.group(2) != null) { 
+        // 💡 修复2：捕获并渲染倾斜字体
+        spans.add(pw.TextSpan(text: match.group(2), style: baseStyle.copyWith(fontStyle: pw.FontStyle.italic)));
+      } else if (match.group(3) != null || match.group(5) != null) { 
+        String colorName = match.group(3) ?? match.group(5)!;
+        String contentText = match.group(4) ?? match.group(6)!;
+        PdfColor c = PdfColors.blue;
+        if (colorName == 'red') c = PdfColors.red;
+        if (colorName == 'green') c = PdfColors.teal;
+        if (colorName == 'orange') c = PdfColors.orange;
+        if (colorName == 'purple') c = PdfColors.purple;
+        spans.add(pw.TextSpan(text: contentText, style: baseStyle.copyWith(color: c)));
+      } else if (match.group(7) != null) {
+        String bgName = match.group(7)!;
+        String contentText = match.group(8)!;
+        PdfColor c = PdfColors.yellow200;
+        if (bgName == 'red') c = PdfColors.red200;
+        if (bgName == 'green') c = PdfColors.teal200;
+        if (bgName == 'blue') c = PdfColors.blue200;
+        if (bgName == 'purple') c = PdfColors.purple200;
+        spans.add(pw.TextSpan(text: contentText, style: baseStyle.copyWith(background: pw.BoxDecoration(color: c))));
+      }
       lastMatchEnd = match.end;
     }
     if (lastMatchEnd < text.length) {
-      spans.add(
-          pw.TextSpan(text: text.substring(lastMatchEnd), style: baseStyle));
+      spans.add(pw.TextSpan(text: text.substring(lastMatchEnd), style: baseStyle));
     }
     return pw.RichText(text: pw.TextSpan(children: spans));
   }

@@ -10,6 +10,10 @@ import 'dart:convert'; // 用于解析 JSON 字符串
 import '../core/constants.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:share_plus/share_plus.dart';
+import '../core/custom_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
+import 'package:gal/gal.dart'; // 💡 引入相册保存专用插件
+import 'package:permission_handler/permission_handler.dart'; // 💡 建议添加权限检查插件
 
 class DiarySharePage extends StatefulWidget {
   final Map<String, dynamic> diary;
@@ -54,68 +58,81 @@ class _DiarySharePageState extends State<DiarySharePage> {
 
     try {
       await Future.delayed(const Duration(milliseconds: 300));
-      final imageBytes = await _screenshotController.capture(pixelRatio: 1.5);
+      // 💡 保证超清画质
+      final imageBytes = await _screenshotController.capture(pixelRatio: 3.0);
 
       if (imageBytes != null) {
+        final String fileName = '长图分享_${DateTime.now().millisecondsSinceEpoch}.png';
         String? savePath;
-        final String fileName =
-            '长图分享_${DateTime.now().millisecondsSinceEpoch}.png';
 
-        // 💡 核心分流：手机端存沙盒唤起分享，电脑端呼出另存为
         if (Platform.isAndroid || Platform.isIOS) {
           final directory = await getApplicationDocumentsDirectory();
-          final exportDir =
-              Directory(p.join(directory.path, 'MyDiary_Data', 'Exports'));
-          if (!await exportDir.exists())
-            await exportDir.create(recursive: true);
+          final exportDir = Directory(p.join(directory.path, 'MyDiary_Data', 'Exports'));
+          if (!await exportDir.exists()) await exportDir.create(recursive: true);
           savePath = p.join(exportDir.path, fileName);
-        } else {
-          final FileSaveLocation? result =
-              await getSaveLocation(suggestedName: fileName);
-          if (result == null) {
-            setState(() => _isCapturing = false);
-            return;
+          await File(savePath).writeAsBytes(imageBytes);
+
+          if (mounted) {
+            // 💡 核心升级：弹出菜单，分流“分享”和“保存”
+            showModalBottomSheet(
+              context: context,
+              shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+              builder: (c) => SafeArea(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Text("长图已生成", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
+                    ),
+                    ListTile(
+                      leading: const CircleAvatar(backgroundColor: Colors.green, child: Icon(Icons.share, color: Colors.white)),
+                      title: const Text("分享给好友 (微信/QQ等)"),
+                      onTap: () async {
+                        Navigator.pop(c);
+                        await Share.shareXFiles([XFile(savePath!)]);
+                      },
+                    ),
+                    ListTile(
+                      leading: const CircleAvatar(backgroundColor: Colors.blue, child: Icon(Icons.save_alt, color: Colors.white)),
+                      title: const Text("直接保存到手机相册"),
+                      onTap: () async {
+                        Navigator.pop(c);
+                        // 💡 强制保存到系统图库
+                        try {
+                          await Gal.putImage(savePath!); 
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 已成功存入相册，请在图库中查看！'), backgroundColor: Colors.teal));
+                          }
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('❌ 保存失败：$e'), backgroundColor: Colors.red));
+                          }
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                ),
+              ),
+            );
           }
-          savePath = result.path;
+        } else {
+          // 💻 电脑端保持原样
+          final FileSaveLocation? result = await getSaveLocation(suggestedName: fileName);
+          if (result == null) return;
+          await File(result.path).writeAsBytes(imageBytes);
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 已保存到电脑！')));
         }
-
-        await File(savePath).writeAsBytes(imageBytes);
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: const Text('🎉 长图已成功生成！'),
-            backgroundColor: Colors.teal,
-            duration: const Duration(seconds: 6),
-            action: (Platform.isAndroid || Platform.isIOS)
-                ? SnackBarAction(
-                    label: '分享/保存',
-                    textColor: Colors.white,
-                    onPressed: () async {
-                      await Share.shareXFiles([XFile(savePath!)]);
-                      // 阅后即焚，不占用手机存储
-                      try {
-                        File(savePath).deleteSync();
-                      } catch (_) {}
-                    },
-                  )
-                : null,
-          ));
-        }
-      } else {
-        if (mounted)
-          ScaffoldMessenger.of(context)
-              .showSnackBar(const SnackBar(content: Text('截取失败，请稍微上下滑动页面再试')));
       }
     } catch (e) {
-      if (mounted)
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('生成错误: $e'), backgroundColor: Colors.red));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('生成失败: $e')));
     } finally {
       if (mounted) setState(() => _isCapturing = false);
     }
   }
-
   @override
+
   Widget build(BuildContext context) {
     final titleStr = widget.diary['title'] as String? ?? '无标题';
     final dateStr = widget.diary['date'] as String? ?? '';
@@ -124,7 +141,7 @@ class _DiarySharePageState extends State<DiarySharePage> {
     final mood = AppConstants.getMoodEmoji(widget.diary['mood'] as String?);
     List<String> images = [];
     try {
-      final imgPath = widget.diary['imagePath'];
+      final imgPath = widget.diary['image_path'] ?? widget.diary['imagePath'];
       if (imgPath != null && imgPath.toString().isNotEmpty) {
         images = List<String>.from(jsonDecode(imgPath.toString()));
       }
@@ -204,30 +221,32 @@ class _DiarySharePageState extends State<DiarySharePage> {
                             height: 1.3)),
                     const SizedBox(height: 24),
                     MarkdownBody(
-                      data: widget.decryptedContent,
+                      // 💡 核心修复 2：将单回车转为双回车（物理分段），彻底解决自定义组件无视换行的官方 Bug！
+                      data: widget.decryptedContent.split('\n').join('\n\n'),
+                      selectable: false,
+                      extensionSet: md.ExtensionSet.gitHubFlavored,
+                      inlineSyntaxes: [ColorTextSyntax(), OldColorTextSyntax(), HighlightTextSyntax()],
+                      builders: {
+                        'colortext': ColorTextBuilder(),
+                        'highlighttext': HighlightTextBuilder(),
+                      },
+                      // 💡 新增：赋予 Markdown 渲染正文内部穿插图片的能力
+                      imageBuilder: (uri, title, alt) {
+                        final path = uri.toString();
+                        if (path.startsWith('http')) return Image.network(path);
+                        if (path.startsWith('assets')) return Image.asset(path);
+                        return Image.file(File(path));
+                      },
                       styleSheet: MarkdownStyleSheet(
-                        // 💡 正文也使用主题的主文本色
-                        p: TextStyle(
-                            fontSize: 16,
-                            height: 1.8,
-                            color: currentTheme['text']),
-                        h1: TextStyle(
-                            fontSize: 22,
-                            height: 1.5,
-                            fontWeight: FontWeight.bold,
-                            color: currentTheme['text']),
-                        h2: TextStyle(
-                            fontSize: 20,
-                            height: 1.5,
-                            fontWeight: FontWeight.bold,
-                            color: currentTheme['text']),
-                        blockquote: TextStyle(
-                            color: currentTheme['subText'],
-                            fontStyle: FontStyle.italic),
-                        blockquoteDecoration: BoxDecoration(
-                            border: Border(
-                                left: BorderSide(
-                                    color: currentTheme['accent']!, width: 4))),
+                        // 💡 核心修复 3：控制分段后的间距，让双回车看起来和普通换行一样紧凑自然
+                        pPadding: EdgeInsets.zero,
+                        blockSpacing: 4, 
+                        
+                        p: TextStyle(fontSize: 16, height: 1.8, color: currentTheme['text']),
+                        h1: TextStyle(fontSize: 22, height: 1.5, fontWeight: FontWeight.bold, color: currentTheme['text']),
+                        h2: TextStyle(fontSize: 20, height: 1.5, fontWeight: FontWeight.bold, color: currentTheme['text']),
+                        blockquote: TextStyle(color: currentTheme['subText'], fontStyle: FontStyle.italic),
+                        blockquoteDecoration: BoxDecoration(border: Border(left: BorderSide(color: currentTheme['accent']!, width: 4))),
                       ),
                     ),
                     //优化排版：将单张铺满的大图改为精致的“照片墙” (九宫格风格)
@@ -309,24 +328,21 @@ class _DiarySharePageState extends State<DiarySharePage> {
             else
               ElevatedButton.icon(
                 onPressed: _captureAndShare,
-                // 💡 动态图标：手机端显示分享图标，电脑端显示下载图标
-                icon: Icon((Platform.isAndroid || Platform.isIOS)
-                    ? Icons.share
-                    : Icons.download),
-                // 💡 动态文案：手机端显示“生成并分享”，电脑端显示“保存到电脑”
+                // 动态图标保持不变
+                icon: Icon((Platform.isAndroid || Platform.isIOS) ? Icons.share : Icons.download),
+                
+                // 💡 修复：修改按钮文案
                 label: Text(
                     (Platform.isAndroid || Platform.isIOS)
-                        ? "生成并分享长图"
+                        ? "生成长图 (分享或保存)" 
                         : "保存长图到电脑",
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.bold)),
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                
                 style: ElevatedButton.styleFrom(
                     backgroundColor: Theme.of(context).primaryColor,
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 40, vertical: 15),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(30))),
+                    padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))),
               ),
             const SizedBox(height: 50),
           ],

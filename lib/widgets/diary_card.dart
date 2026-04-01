@@ -11,7 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:media_kit/media_kit.dart' hide PlayerState;
 import 'package:media_kit_video/media_kit_video.dart';
-
+import '../core/custom_markdown.dart';
 import '../core/database_helper.dart';
 import '../core/constants.dart'; // 💡 新增：引入状态码字典解析器
 import '../pages/edit_page.dart';
@@ -50,6 +50,73 @@ class DiaryCard extends StatelessWidget {
     } else {
       _showDetail(context, null);
     }
+  }
+
+  // 💡 专属富文本预览引擎：完美在列表外层渲染出颜色、高亮和粗体斜体！
+  Widget _buildPreview(String raw, {int maxLines = 2, TextStyle? style}) {
+    if (diary['is_locked'] == 1) {
+      return Text("内容已加密，点击输入密码查看", maxLines: maxLines, overflow: TextOverflow.ellipsis, style: style);
+    }
+    
+    String s = raw;
+    s = s.replaceAll(RegExp(r'#{1,6}\s+'), '');
+    s = s.replaceAll('\n', ' ').trim();
+
+    final List<InlineSpan> spans = [];
+
+    // 2. 匹配所有颜色和高亮标签
+    final RegExp regex = RegExp(
+      r'\*\*(.*?)\*\*|\*(.*?)\*|~~(.*?)~~|`(.*?)`|\[(red|blue|green|orange|purple)\](.*?)\[/\]|<font color="(red|blue|green|orange|purple)">(.*?)</font>|\[bg_(yellow|red|green|blue|purple)\](.*?)\[/bg\]'
+    );
+
+    s.splitMapJoin(
+      regex,
+      onMatch: (Match match) {
+        if (match.group(1) != null) {
+          // 💡 只叠加粗体，不再覆盖基础样式
+          spans.add(TextSpan(text: match.group(1), style: const TextStyle(fontWeight: FontWeight.bold)));
+        } else if (match.group(2) != null) {
+          spans.add(TextSpan(text: match.group(2), style: const TextStyle(fontStyle: FontStyle.italic)));
+        } else if (match.group(3) != null) {
+          spans.add(TextSpan(text: match.group(3), style: const TextStyle(decoration: TextDecoration.lineThrough)));
+        } else if (match.group(4) != null) {
+          spans.add(TextSpan(text: match.group(4), style: TextStyle(backgroundColor: Colors.grey.withOpacity(0.2), color: Colors.blueAccent)));
+        } else if (match.group(5) != null || match.group(7) != null) {
+          String cName = match.group(5) ?? match.group(7)!;
+          String contentText = match.group(6) ?? match.group(8)!;
+          Color tColor = Colors.blue;
+          if (cName == 'red') tColor = Colors.redAccent;
+          else if (cName == 'green') tColor = Colors.teal;
+          else if (cName == 'orange') tColor = Colors.orange;
+          else if (cName == 'purple') tColor = Colors.purpleAccent;
+          spans.add(TextSpan(text: contentText, style: TextStyle(color: tColor)));
+        } else if (match.group(9) != null) {
+          String bgName = match.group(9)!;
+          String contentText = match.group(10)!;
+          Color bgColor = Colors.yellow.withOpacity(0.4);
+          if (bgName == 'red') bgColor = Colors.redAccent.withOpacity(0.3);
+          else if (bgName == 'green') bgColor = Colors.teal.withOpacity(0.3);
+          else if (bgName == 'blue') bgColor = Colors.blueAccent.withOpacity(0.3);
+          else if (bgName == 'purple') bgColor = Colors.purpleAccent.withOpacity(0.3);
+          spans.add(TextSpan(text: contentText, style: TextStyle(backgroundColor: bgColor)));
+        }
+        return '';
+      },
+      onNonMatch: (String text) {
+        // 💡 普通文本不再强加 style，让它自然继承
+        spans.add(TextSpan(text: text));
+        return '';
+      },
+    );
+
+    // 💡 命门修复：使用 Text.rich 替代 RichText，并且把 style 挂载到外层
+    // 这样它就会完美继承你 App 全局的主题字体、手机屏幕缩放比例，恢复原本饱满的粗细！
+    return Text.rich(
+      TextSpan(children: spans),
+      maxLines: maxLines,
+      overflow: TextOverflow.ellipsis,
+      style: style,
+    );
   }
 
   void _showUnlockDialog(BuildContext context) {
@@ -400,30 +467,36 @@ class DiaryCard extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 MarkdownBody(
-                  data: contentStr.split('\n').map((line) {
-                    String pLine = line;
-                    int spaceCount = 0;
-                    while (spaceCount < pLine.length &&
-                        (pLine[spaceCount] == ' ' ||
-                            pLine[spaceCount] == '　' ||
-                            pLine[spaceCount] == '\t' ||
-                            pLine[spaceCount] == ' ')) {
-                      spaceCount++;
-                    }
-                    if (spaceCount > 0) {
-                      pLine =
-                          '\u3000' * spaceCount + pLine.substring(spaceCount);
-                    }
-                    return pLine;
-                  }).join('\n\n'),
-                  selectable: true,
+                  // 💡 同样使用硬分段彻底解决换行粘连
+                  data: contentStr.split('\n').join('\n\n'), 
+                  selectable: false, 
                   extensionSet: md.ExtensionSet.gitHubFlavored,
+                  inlineSyntaxes: [ColorTextSyntax(), OldColorTextSyntax(), HighlightTextSyntax()],
+                  builders: {
+                    'colortext': ColorTextBuilder(),
+                    'highlighttext': HighlightTextBuilder(),
+                  },
+                  // 💡 紧凑的样式
+                  styleSheet: MarkdownStyleSheet(
+                    pPadding: EdgeInsets.zero,
+                    blockSpacing: 4,
+                  ),
+                  // 💡 同步赋予阅读弹窗加载本地图片的能力
+                  imageBuilder: (uri, title, alt) {
+                    final path = uri.toString();
+                    if (path.startsWith('http')) {
+                      return Image.network(path);
+                    } else if (path.startsWith('assets')) {
+                      return Image.asset(path);
+                    } else {
+                      return Image.file(File(path)); // 必须引入 dart:io
+                    }
+                  },
                   onTapLink: (text, href, title) async {
                     if (href != null) {
                       final Uri url = Uri.parse(href);
                       if (await canLaunchUrl(url)) {
-                        await launchUrl(url,
-                            mode: LaunchMode.externalApplication);
+                        await launchUrl(url, mode: LaunchMode.externalApplication);
                       }
                     }
                   },
@@ -695,12 +768,7 @@ class DiaryCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const SizedBox(height: 4),
-                    Text(
-                        isLocked
-                            ? "内容已加密，点击输入密码查看"
-                            : (diary['content'] as String? ?? ""),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
+                    _buildPreview(diary['content'] as String? ?? "", maxLines: 1),
                     const SizedBox(height: 8),
                     Row(children: [
                       if (isNote) ...[
@@ -877,14 +945,7 @@ class DiaryCard extends StatelessWidget {
                     ],
                     const SizedBox(height: 4),
                     // 摘要预览
-                    Text(
-                        isLocked
-                            ? "内容已加密，点击输入密码查看"
-                            : (diary['content'] as String? ?? ""),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 13, color: Colors.black87, height: 1.4)),
+                    _buildPreview(diary['content'] as String? ?? "", maxLines: 2, style: const TextStyle(fontSize: 13, color: Colors.black87, height: 1.4)),
                   ],
                 ),
               ),
@@ -929,7 +990,7 @@ class DiaryCard extends StatelessWidget {
   List<pw.Widget> _renderMarkdown(
       String text, pw.Font regular, pw.Font bold, pw.Font emoji) {
     List<pw.Widget> widgets = [];
-    final lines = text.split('\n');
+    final lines = text.split('\n'); // 💡 直接用原生 split
 
     // 💡 核心修复 1：强制显式注入 fallback，确保每一行文字哪怕混排中英文，也绝对不会丢失 Emoji
     final fallbackStyle = pw.TextStyle(font: regular, fontFallback: [emoji]);
@@ -1010,34 +1071,51 @@ class DiaryCard extends StatelessWidget {
     return widgets;
   }
 
-  pw.Widget _parseInline(
-      String text, pw.TextStyle regularStyle, pw.TextStyle boldStyle,
-      {bool isQuote = false}) {
-    final RegExp exp = RegExp(r'\*\*(.*?)\*\*');
+  pw.Widget _parseInline(String text, pw.TextStyle regularStyle, pw.TextStyle boldStyle, {bool isQuote = false}) {
+    // 💡 修复1：正则表达式加入 |\*(.*?)\*| 以捕获倾斜字体
+    final RegExp exp = RegExp(r'\*\*(.*?)\*\*|\*(.*?)\*|\[(red|blue|green|orange|purple)\](.*?)\[/\]|<font color="(red|blue|green|orange|purple)">(.*?)</font>|\[bg_(yellow|red|green|blue|purple)\](.*?)\[/bg\]');
     final Iterable<RegExpMatch> matches = exp.allMatches(text);
 
-    pw.TextStyle baseStyle = isQuote
-        ? regularStyle.copyWith(color: PdfColors.grey700)
-        : regularStyle;
-    pw.TextStyle bStyle =
-        isQuote ? boldStyle.copyWith(color: PdfColors.grey700) : boldStyle;
+    pw.TextStyle baseStyle = isQuote ? regularStyle.copyWith(color: PdfColors.grey700) : regularStyle;
+    pw.TextStyle bStyle = isQuote ? boldStyle.copyWith(color: PdfColors.grey700) : boldStyle;
 
-    if (matches.isEmpty)
-      return pw.Text(text, style: baseStyle.copyWith(lineSpacing: 3));
+    if (matches.isEmpty) return pw.Text(text, style: baseStyle.copyWith(lineSpacing: 3));
 
     List<pw.TextSpan> spans = [];
     int lastMatchEnd = 0;
     for (final match in matches) {
       if (match.start > lastMatchEnd) {
-        spans.add(pw.TextSpan(
-            text: text.substring(lastMatchEnd, match.start), style: baseStyle));
+        spans.add(pw.TextSpan(text: text.substring(lastMatchEnd, match.start), style: baseStyle));
       }
-      spans.add(pw.TextSpan(text: match.group(1), style: bStyle));
+      if (match.group(1) != null) { 
+        // 渲染加粗
+        spans.add(pw.TextSpan(text: match.group(1), style: bStyle));
+      } else if (match.group(2) != null) { 
+        // 💡 修复2：捕获并渲染倾斜字体
+        spans.add(pw.TextSpan(text: match.group(2), style: baseStyle.copyWith(fontStyle: pw.FontStyle.italic)));
+      } else if (match.group(3) != null || match.group(5) != null) { 
+        String colorName = match.group(3) ?? match.group(5)!;
+        String contentText = match.group(4) ?? match.group(6)!;
+        PdfColor c = PdfColors.blue;
+        if (colorName == 'red') c = PdfColors.red;
+        if (colorName == 'green') c = PdfColors.teal;
+        if (colorName == 'orange') c = PdfColors.orange;
+        if (colorName == 'purple') c = PdfColors.purple;
+        spans.add(pw.TextSpan(text: contentText, style: baseStyle.copyWith(color: c)));
+      } else if (match.group(7) != null) {
+        String bgName = match.group(7)!;
+        String contentText = match.group(8)!;
+        PdfColor c = PdfColors.yellow200;
+        if (bgName == 'red') c = PdfColors.red200;
+        if (bgName == 'green') c = PdfColors.teal200;
+        if (bgName == 'blue') c = PdfColors.blue200;
+        if (bgName == 'purple') c = PdfColors.purple200;
+        spans.add(pw.TextSpan(text: contentText, style: baseStyle.copyWith(background: pw.BoxDecoration(color: c))));
+      }
       lastMatchEnd = match.end;
     }
     if (lastMatchEnd < text.length) {
-      spans.add(
-          pw.TextSpan(text: text.substring(lastMatchEnd), style: baseStyle));
+      spans.add(pw.TextSpan(text: text.substring(lastMatchEnd), style: baseStyle));
     }
     return pw.RichText(text: pw.TextSpan(children: spans));
   }
